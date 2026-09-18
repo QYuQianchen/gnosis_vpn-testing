@@ -1,0 +1,10 @@
+# Data and state that must survive a deploy — the post-receive hook uses
+# `checkout -f`, which only replaces TRACKED files, so keeping these untracked
+# is what stops a push from destroying a run in progress.
+bench-runs/
+arms/
+faucet-codes
+faucet-codes.used
+BUILD.txt
+__pycache__/
+*.pyc

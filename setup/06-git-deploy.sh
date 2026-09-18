@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+#
+# 06-git-deploy.sh -- turn the VM into a git push target, so you edit locally and
+#                     `git push vm main` deploys.
+#
+# Run ONCE on the VM, as your normal user (not root):
+#
+#   ./06-git-deploy.sh              # in place: ~/gvpn-8408 IS the repo   [default]
+#   ./06-git-deploy.sh --bare       # separate bare repo at ~/gvpn-8408.git
+#
+# It prints the commands to run on your Mac afterwards.
+#
+# IN-PLACE vs BARE
+#
+#   In place keeps everything under one directory: the repo is ~/gvpn-8408/.git
+#   and there is no second path cluttering your home. Pushing into a repo whose
+#   branch is checked out is refused by default, so this sets
+#   receive.denyCurrentBranch=updateInstead, which is git's supported way to do
+#   push-to-deploy.
+#
+#   Bare keeps the repo and the working copy apart, which some people prefer for
+#   servers. Same result, one more directory.
+#
+# THE UNTRACKED-FILE WRINKLE, AND WHY THERE IS A push-to-checkout HOOK
+#
+#   `updateInstead` refuses a push that would overwrite an UNTRACKED file -- and
+#   on a VM where the kit was first copied by hand, every file is untracked, so
+#   the very first push fails with "would be overwritten by merge".
+#
+#   push-to-checkout is git's designed override for that. It makes the pushed
+#   tree authoritative for the paths git actually tracks, while leaving
+#   everything else on disk alone. That distinction is the whole safety story:
+#
+#     replaced   setup/, bench/, docs/, README.md, gvpn.conf   (tracked)
+#     untouched  arms/, bench-runs/, faucet-codes, BUILD.txt   (gitignored)
+#
+#   So a deploy can never destroy a run in progress, the arm configs you
+#   validated, your faucet codes, or the recorded build identity of the machine.
+#
+set -euo pipefail
+
+WORKTREE="${GVPN_WORKTREE:-$HOME/gvpn-8408}"
+BRANCH="${GVPN_BRANCH:-main}"
+MODE=inplace
+BARE="${GVPN_BARE:-$HOME/gvpn-8408.git}"
+
+usage() {
+  cat <<EOF
+06-git-deploy.sh -- make this VM a git push target
+
+Usage: $0 [--bare] [--worktree DIR] [--branch NAME]
+
+  --bare            separate bare repo at $BARE (default: repo lives in the worktree)
+  --worktree DIR    deploy destination (default: $WORKTREE)
+  --branch NAME     branch to deploy (default: $BRANCH)
+  -h, --help
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bare)     MODE=bare; shift ;;
+    --worktree) WORKTREE="$2"; shift 2 ;;
+    --branch)   BRANCH="$2"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root" >&2; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "installing git"; sudo apt-get install -y -qq git; }
+say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# The post-receive hook must not rely on its inherited working directory: during a
+# push GIT_DIR is set, and `git rev-parse --show-toplevel` does not give the
+# worktree. The path is baked in at install time instead.
+write_post_receive() {  # write_post_receive HOOKS_DIR
+  cat > "$1/post-receive" <<EOF
+#!/usr/bin/env bash
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+cd "$WORKTREE" 2>/dev/null || exit 0
+chmod +x setup/*.sh bench/*.sh bench/*.py 2>/dev/null || true
+rc=0
+for f in setup/*.sh bench/*.sh; do
+  [ -f "\$f" ] || continue
+  bash -n "\$f" 2>&1 || { echo "  !! SYNTAX ERROR in \$f"; rc=1; }
+done
+if ls bench/*.py >/dev/null 2>&1; then
+  python3 -m py_compile bench/*.py 2>&1 && rm -rf bench/__pycache__ \\
+    || { echo "  !! PYTHON SYNTAX ERROR in bench/"; rc=1; }
+fi
+[ \$rc -eq 0 ] && echo "  deployed $BRANCH -> $WORKTREE (syntax ok)" \\
+               || echo "  deployed $BRANCH -> $WORKTREE  WITH ERRORS ABOVE"
+EOF
+  chmod +x "$1/post-receive"
+}
+
+if [ "$MODE" = inplace ]; then
+  say "repo in place at $WORKTREE"
+  mkdir -p "$WORKTREE"
+  if [ -d "$WORKTREE/.git" ]; then
+    echo "    already a git repo"
+  else
+    git init --quiet --initial-branch="$BRANCH" "$WORKTREE"
+    echo "    initialised"
+  fi
+  GITDIR="$WORKTREE/.git"
+
+  # Allow pushing to the branch that is checked out here.
+  git -C "$WORKTREE" config receive.denyCurrentBranch updateInstead
+
+  say "push-to-checkout hook"
+  cat > "$GITDIR/hooks/push-to-checkout" <<'HOOK'
+#!/bin/sh
+set -e
+git update-index -q --refresh
+# --reset makes the pushed tree authoritative for TRACKED paths, replacing a
+# stale hand-copied file even though it is currently untracked. Paths that are
+# not in the tree -- arms/, bench-runs/, faucet-codes, BUILD.txt -- are left
+# exactly as they are, which is what keeps a deploy from eating a live run.
+git read-tree -u --reset "$1"
+HOOK
+  chmod +x "$GITDIR/hooks/push-to-checkout"
+  write_post_receive "$GITDIR/hooks"
+  echo "    installed"
+  REMOTE_PATH="$WORKTREE"
+else
+  say "bare repo at $BARE"
+  [ -d "$BARE" ] && echo "    already exists" \
+                 || { git init --bare --quiet --initial-branch="$BRANCH" "$BARE"; echo "    created"; }
+  say "post-receive hook"
+  cat > "$BARE/hooks/post-receive" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+while read -r _old _new ref; do
+  [ "\$ref" = "refs/heads/$BRANCH" ] || continue
+  mkdir -p "$WORKTREE"
+  git --work-tree="$WORKTREE" --git-dir="$BARE" checkout -f "$BRANCH"
+done
+EOF
+  cat >> "$BARE/hooks/post-receive" <<EOF
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+cd "$WORKTREE" || exit 0
+chmod +x setup/*.sh bench/*.sh bench/*.py 2>/dev/null || true
+for f in setup/*.sh bench/*.sh; do [ -f "\$f" ] && { bash -n "\$f" || echo "  !! SYNTAX ERROR in \$f"; }; done
+echo "  deployed $BRANCH -> $WORKTREE"
+EOF
+  chmod +x "$BARE/hooks/post-receive"
+  echo "    installed"
+  REMOTE_PATH="$BARE"
+fi
+
+HOSTPART="$(id -un)@$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+cat <<EOF
+
+==> Done. On your Mac, from your local copy of the kit:
+
+    cd /path/to/gvpn-8408
+    git init -b $BRANCH                       # if it is not a repo yet
+    git add -A && git commit -m "kit"
+    git remote add vm "$HOSTPART:$REMOTE_PATH"
+    git push -u vm $BRANCH
+
+With an SSH config alias (docs/dev-workflow.md), nicer as:
+
+    git remote set-url vm gvpn-vm:$REMOTE_PATH
+
+Thereafter:  edit -> git commit -> git push vm $BRANCH
+
+REPLACED BY A DEPLOY (tracked):    setup/ bench/ docs/ README.md gvpn.conf
+NEVER TOUCHED (gitignored):        arms/ bench-runs/ faucet-codes BUILD.txt
+
+Make sure your LOCAL copy is current before the first push -- it becomes the
+source of truth for every tracked file on this machine.
+EOF

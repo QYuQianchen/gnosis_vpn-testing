@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#
+# 06-git-deploy.sh -- turn the VM into a git push target, so you edit locally and
+#                     `git push vm main` deploys.
+#
+# Run ONCE on the VM, as your normal user (not root):
+#
+#   ./06-git-deploy.sh
+#
+# It prints the two commands to run on your Mac afterwards.
+#
+# WHY A BARE REPO ON THE VM RATHER THAN GITHUB
+#
+#   No credentials on the VM. A private GitHub repo would need a deploy key or a
+#   token living on a box that also holds a funded HOPR identity, and it adds a
+#   third party to a two-machine workflow. Pushing straight to the VM reuses the
+#   SSH access you already have and nothing else.
+#
+#   You can still have a GitHub remote as well -- git is happy with several
+#   remotes, so `git push origin main` for the team and `git push vm main` to
+#   deploy is a perfectly normal arrangement.
+#
+# WHAT THE HOOK DOES, AND WHAT IT DELIBERATELY DOES NOT TOUCH
+#
+#   post-receive checks the pushed tree out over the working copy with
+#   `checkout -f`, which replaces TRACKED files only. Untracked things --
+#   arms/, bench-runs/, faucet-codes, BUILD.txt -- are left alone. That is the
+#   point: a deploy must never destroy a run in progress or the arm configs you
+#   validated. The .gitignore in the repo keeps them untracked.
+#
+set -euo pipefail
+
+WORKTREE="${GVPN_WORKTREE:-$HOME/gvpn-8408}"
+BARE="${GVPN_BARE:-$HOME/gvpn-8408.git}"
+BRANCH="${GVPN_BRANCH:-main}"
+
+[ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root" >&2; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "installing git"; sudo apt-get install -y -qq git; }
+
+say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+say "bare repo at $BARE"
+if [ -d "$BARE" ]; then
+  echo "    already exists"
+else
+  git init --bare --quiet --initial-branch="$BRANCH" "$BARE"
+  echo "    created"
+fi
+
+say "post-receive hook"
+cat > "$BARE/hooks/post-receive" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+WORKTREE="$WORKTREE"
+BRANCH="$BRANCH"
+while read -r _old _new ref; do
+  [ "\$ref" = "refs/heads/\$BRANCH" ] || continue
+  mkdir -p "\$WORKTREE"
+  # checkout -f replaces tracked files only; arms/, bench-runs/ and faucet-codes
+  # are untracked and survive, so a deploy cannot clobber a run in progress.
+  git --work-tree="\$WORKTREE" --git-dir="$BARE" checkout -f "\$BRANCH"
+  chmod +x "\$WORKTREE"/setup/*.sh "\$WORKTREE"/bench/*.sh "\$WORKTREE"/bench/*.py 2>/dev/null || true
+  echo "  deployed \$BRANCH -> \$WORKTREE"
+  # Syntax-check on arrival. Finding a broken paste here beats finding it at
+  # 3am in cycle 40 of a soak.
+  for f in "\$WORKTREE"/setup/*.sh "\$WORKTREE"/bench/*.sh; do
+    bash -n "\$f" || echo "  !! SYNTAX ERROR in \$f"
+  done
+  python3 -m py_compile "\$WORKTREE"/bench/*.py 2>/dev/null \\
+    && rm -rf "\$WORKTREE"/bench/__pycache__ \\
+    || echo "  !! python syntax error in bench/"
+done
+EOF
+chmod +x "$BARE/hooks/post-receive"
+echo "    installed"
+
+say "seeding from the current working copy"
+if [ -d "$WORKTREE/.git" ]; then
+  echo "    $WORKTREE is already a git repo; leaving it alone"
+else
+  echo "    $WORKTREE is not a git repo -- that is fine."
+  echo "    The first push from your Mac will populate it."
+fi
+
+HOSTUSER="$(id -un)@$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+cat <<EOF
+
+==> Done. On your Mac, from the kit directory:
+
+    cd /path/to/gvpn-8408
+    git init -b $BRANCH                      # if it is not a repo yet
+    git add -A && git commit -m "kit"
+    git remote add vm "$HOSTUSER:$BARE"
+    git push -u vm $BRANCH
+
+    Thereafter:  edit -> git commit -> git push vm $BRANCH   (deploys instantly)
+
+If you use an SSH config alias (recommended, see docs/dev-workflow.md), the
+remote is nicer as:
+
+    git remote set-url vm gvpn-vm:$BARE
+
+WHAT IS NOT DEPLOYED, ON PURPOSE:
+    arms/          validated per-arm configs -- regenerating them is a decision
+    bench-runs/    your data
+    faucet-codes   secrets
+    BUILD.txt      the recorded build identity of THIS machine
+These are in .gitignore and the hook leaves untracked files untouched.
+EOF
