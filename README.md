@@ -11,6 +11,7 @@ setup/04-build-patched.sh  build from source                (optional — Phase 
 setup/05-set-version.sh    switch / pin the client build    (reads gvpn.conf)
 setup/06-git-deploy.sh     make the VM a git push target    (run once, on the VM)
                            in-place by default; --bare for a separate repo dir
+bench/use-arm.sh           install one arm by hand; --count checks the pin took
 bench/gvpn-bench.sh        the interleaved A/B runner
 bench/gvpn-analyze.py      per-arm comparison and variance decomposition
 docs/plan.md               the full test plan

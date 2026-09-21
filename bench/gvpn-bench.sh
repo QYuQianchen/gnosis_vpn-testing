@@ -117,6 +117,10 @@ ARMS=""
 CYCLES=""
 DURATION=""
 DESTINATION="${GVPN_DESTINATION:-}"
+# Exit as a DIMENSION, not a constant: "UK USA India" runs every arm against every
+# exit each cycle, so pinned-vs-auto can be read per exit. Empty falls back to
+# DESTINATION, or to the first the service reports.
+DESTINATIONS="${GVPN_DESTINATIONS:-}"
 
 MODE=""
 DL_BYTES=""; UL_BYTES=""
@@ -136,7 +140,9 @@ TARGET="${GVPN_TARGET:-iperf3}"          # iperf3 | url
 # {bytes} is substituted with the wanted volume. Cloudflare's endpoint returns
 # exactly N bytes, which is what makes bytes-mode exact without Range requests.
 DL_URL="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
-UL_URL="${GVPN_UL_URL:-}"                # empty => no upload leg in url mode
+# Cloudflare's speedtest upload endpoint, so url mode measures BOTH directions
+# without a second machine. Set empty to skip the upload leg.
+UL_URL="${GVPN_UL_URL:-https://speed.cloudflare.com/__up}"
 UDP_HOST="${GVPN_UDP_HOST:-}"            # iperf3 host for the UDP leg only
 
 IPERF_SERVER="${GVPN_IPERF_SERVER:-}"
@@ -213,7 +219,9 @@ Measurement:
 Setup:
       --arms-dir DIR      (default: $ARMS_DIR)
   -a, --arms "x y"        arms to cycle (default: all in --arms-dir)
-  -D, --destination ID    exit destination (default: first reported)
+  -D, --destination ID    single exit destination
+      --destinations "A B"  compare across several exits; every arm runs against
+                          every exit each cycle (multiplies the schedule)
   -s, --iperf-server H    iperf3 server  [required]
       --iperf-port P      (default: $IPERF_PORT)
   -o, --out DIR           (default: $OUT_ROOT)
@@ -301,6 +309,7 @@ while [ $# -gt 0 ]; do
     --no-flush-metrics)  FLUSH_TCP_METRICS=0; shift ;;
     --leg-timeout)       LEG_TIMEOUT="$2"; shift 2 ;;
     -D|--destination)    DESTINATION="$2"; shift 2 ;;
+    --destinations)      DESTINATIONS="$2"; shift 2 ;;
     --target)            TARGET="$2"; shift 2 ;;
     --url)               DL_URL="$2"; shift 2 ;;
     --url-up)            UL_URL="$2"; shift 2 ;;
@@ -741,7 +750,12 @@ esac
 [ -n "$ARMS" ] || { echo "no arms found in $ARMS_DIR" >&2; exit 1; }
 ARM_COUNT=$(printf '%s\n' $ARMS | grep -c .)
 
-CYCLE_EST=$(( SESSION_EST * ARM_COUNT ))
+# One list drives the loop whether the user gave one exit or several.
+[ -n "$DESTINATIONS" ] || DESTINATIONS="$DESTINATION"
+DEST_COUNT=$(printf '%s\n' $DESTINATIONS | grep -c . || echo 1)
+[ "$DEST_COUNT" -lt 1 ] && DEST_COUNT=1
+
+CYCLE_EST=$(( SESSION_EST * ARM_COUNT * DEST_COUNT ))
 if [ -n "$DURATION" ]; then
   BUDGET=$(parse_duration "$DURATION") || exit 2
   [ -n "$CYCLES" ] || CYCLES=$(( BUDGET / CYCLE_EST + 1 ))
@@ -756,6 +770,7 @@ TOTAL_EST=$(( CYCLE_EST * CYCLES ))
 describe_schedule() {
   echo "profile:      $PROFILE"
   echo "arms:         $ARMS($ARM_COUNT)"
+  echo "exits:        ${DESTINATIONS:-<first reported>} ($DEST_COUNT)"
   if [ "$MODE" = bytes ]; then
     echo "mode:         bytes -- down $DL_BYTES, up $UL_BYTES (estimates assume ~${ASSUME_MBPS} Mbit/s)"
   else
@@ -771,7 +786,7 @@ describe_schedule() {
   fi
   echo "leg timeout:  ${LEG_TIMEOUT}s"
   echo "per session:  ~${SESSION_EST}s    per cycle: ~${CYCLE_EST}s"
-  echo "cycles:       $CYCLES => $CYCLES sessions/arm, $(( CYCLES * ARM_COUNT * REPS )) transfers total"
+  echo "cycles:       $CYCLES => $CYCLES sessions per arm PER EXIT, $(( CYCLES * ARM_COUNT * DEST_COUNT * REPS )) transfers total"
   [ -n "$BUDGET" ] && echo "time budget:  $DURATION ($(human_secs "$BUDGET")) -- stops after the last whole cycle that fits"
   echo "estimated:    $(human_secs "$TOTAL_EST")"
   echo "dead-man cap: $(human_secs "$DEADMAN_HARD")"
@@ -831,7 +846,7 @@ cat > "$RUN_DIR/manifest.json" <<EOF
  "dl_seconds":"${DL_SECONDS:-}","ul_seconds":"${UL_SECONDS:-}",
  "reps":$REPS,"rep_gap_s":$REP_GAP_S,"udp_seconds":${UDP_SECONDS:-0},"udp_rate":"$UDP_RATE",
  "leg_timeout":$LEG_TIMEOUT,"cycles":$CYCLES,"duration":"${DURATION:-}",
- "arms":"$ARMS","target":"$TARGET","dl_url":"${DL_URL:-}","ul_url":"${UL_URL:-}",
+ "arms":"$ARMS","destinations":"${DESTINATIONS:-}","target":"$TARGET","dl_url":"${DL_URL:-}","ul_url":"${UL_URL:-}",
  "iperf_server":"$IPERF_SERVER","udp_host":"${UDP_HOST:-}","started":"$(stamp)"}
 EOF
 
@@ -880,12 +895,16 @@ run_reps() {  # run_reps SESSION_DIR
   done
 }
 
-run_session() {  # run_session CYCLE ARM
-  local cycle="$1" arm="$2"
+run_session() {  # run_session CYCLE ARM [DEST]
+  local cycle="$1" arm="$2" want_dest="${3:-}"
   local arm_dir="$ARMS_DIR/$arm"
-  local d="$RUN_DIR/cycle-$(printf '%03d' "$cycle")/$arm"
+  # The exit is part of the session's identity, so a run that sweeps several
+  # exits does not collide on disk and the analyser can group by (arm, exit).
+  local tag="$arm"
+  [ -n "$want_dest" ] && tag="${arm}__$(printf '%s' "$want_dest" | tr ' /' '__')"
+  local d="$RUN_DIR/cycle-$(printf '%03d' "$cycle")/$tag"
   mkdir -p "$d"
-  log "--- cycle $cycle / arm $arm ---"
+  log "--- cycle $cycle / arm $arm${want_dest:+ / exit $want_dest} ---"
 
   dm_arm "$SERVICE_TIMEOUT"
   apply_arm_config "$arm_dir" || { echo "$cycle,$arm,-,$d,-,$REPS,config-failed" >> "$SUMMARY"; return 1; }
@@ -901,7 +920,7 @@ run_session() {  # run_session CYCLE ARM
       || { echo "$cycle,$arm,-,$d,-,$REPS,not-ready" >> "$SUMMARY"; return 1; }
   fi
 
-  local dest="$DESTINATION"
+  local dest="${want_dest:-$DESTINATION}"
   [ -n "$dest" ] || dest="$(list_destinations | head -1)"
   [ -n "$dest" ] || { echo "$cycle,$arm,-,$d,-,$REPS,no-destination" >> "$SUMMARY"; return 1; }
 
@@ -949,9 +968,20 @@ while [ "$CYCLE" -le "$CYCLES" ]; do
     fi
   fi
   log "===== cycle $CYCLE/$CYCLES ====="
-  for ARM in $ARMS; do
-    run_session "$CYCLE" "$ARM" || log "  arm $ARM failed this cycle; continuing"
-  done
+  # Arms inner, exits outer -- so every arm meets every exit within the same
+  # cycle and the paired per-cycle comparison holds for each exit separately.
+  if [ "$DEST_COUNT" -gt 1 ] || [ -n "$DESTINATIONS" ]; then
+    for DST in $DESTINATIONS; do
+      for ARM in $ARMS; do
+        run_session "$CYCLE" "$ARM" "$DST" \
+          || log "  arm $ARM / exit $DST failed this cycle; continuing"
+      done
+    done
+  else
+    for ARM in $ARMS; do
+      run_session "$CYCLE" "$ARM" || log "  arm $ARM failed this cycle; continuing"
+    done
+  fi
   CYCLE=$(( CYCLE + 1 ))
 done
 

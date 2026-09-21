@@ -243,6 +243,7 @@ def analyse_session(sdir: Path):
         "down_median": st.median(meds),          # the session's throughput
         "within_cv": cv(meds),                   # stability across its own reps
         "rep_medians": meds,
+        "up_median": med([r["up_median"] for r in usable if r.get("up_median") is not None]),
         "tail_spread": med([r["tail_spread"] for r in usable if r["tail_spread"] is not None]),
         "stall_rate": med([r["stall_rate"] for r in usable if r["stall_rate"] is not None]),
         "down_seconds": med([r["down_seconds"] for r in usable if r.get("down_seconds")]),
@@ -265,6 +266,7 @@ def main():
     ap.add_argument("run_dir")
     ap.add_argument("--floor-mbps", type=float, default=FLOOR_MBPS_DEFAULT)
     ap.add_argument("--csv", help="write per-session rows here")
+    ap.add_argument("--markdown", help="write a GitHub-ready comparison table here")
     args = ap.parse_args()
 
     run = Path(args.run_dir)
@@ -295,6 +297,7 @@ def main():
                 bucket(arm)["failed"] += 1
                 continue
             s["arm"], s["cycle"] = arm, rec["cycle"]
+            s["dest"] = rec.get("destination") or "-"
             bucket(arm)["sessions"].append(s)
             rows.append(s)
 
@@ -443,6 +446,74 @@ def main():
         print()
         print("Read the deltas with floor% above: an arm that loses a little median")
         print("throughput while cutting floor% is the outcome this issue wants.")
+
+    # ---- per exit: the comparison the issue actually asks for ----
+    exits = sorted({s.get("dest", "-") for g in by_arm.values() for s in g["sessions"]})
+    if len(exits) > 1 or (exits and exits[0] != "-"):
+        print()
+        print("Per exit node -- pinned vs auto, one block per exit.")
+        print("Mbit/s; dn = download, up = upload; rtt/jit from the in-tunnel ping.")
+        for ex in exits:
+            rows = [(arm, [s for s in g["sessions"] if s.get("dest") == ex])
+                    for arm, g in sorted(by_arm.items())]
+            rows = [(a, ss) for a, ss in rows if ss]
+            if not rows:
+                continue
+            print()
+            print(f"  exit: {ex}")
+            h = (f"    {'arm':<16}{'n':>4}{'dn_p10':>8}{'dn_p50':>8}{'dn_p90':>8}"
+                 f"{'up_p50':>8}{'floor%':>8}{'rtt_ms':>8}{'jit_ms':>8}{'loss%':>7}{'disc%':>7}{'relays':>7}")
+            print(h)
+            print("    " + "-" * (len(h) - 4))
+            base_med = None
+            for arm, ss in rows:
+                meds = [s["down_median"] for s in ss]
+                if arm == "auto":
+                    base_med = med(meds)
+                print(
+                    f"    {arm:<16}{len(ss):>4}"
+                    f"{fmt(pct(meds,10)):>8}{fmt(pct(meds,50)):>8}{fmt(pct(meds,90)):>8}"
+                    f"{fmt(med([s['up_median'] for s in ss if s.get('up_median') is not None])):>8}"
+                    f"{fmt(sum(1 for m in meds if m < args.floor_mbps)/len(meds)*100,1):>8}"
+                    f"{fmt(med([s['ping_rtt_ms'] for s in ss if s.get('ping_rtt_ms') is not None]),1):>8}"
+                    f"{fmt(med([s['ping_jitter_ms'] for s in ss if s.get('ping_jitter_ms') is not None]),1):>8}"
+                    f"{fmt(med([s['ping_loss_pct'] for s in ss if s.get('ping_loss_pct') is not None]),2):>7}"
+                    f"{fmt((med([s['discard_rate'] for s in ss if s.get('discard_rate') is not None]) or 0)*100,2) if any(s.get('discard_rate') is not None for s in ss) else '-':>7}"
+                    f"{fmt(med([s['relays'] for s in ss if s.get('relays') is not None]),1) if any(s.get('relays') is not None for s in ss) else '-':>7}"
+                )
+            if base_med:
+                for arm, ss in rows:
+                    if arm == "auto":
+                        continue
+                    m = med([s["down_median"] for s in ss])
+                    if m:
+                        print(f"    {arm} vs auto: {(m/base_med - 1)*100:+.1f}% download median")
+
+    # ---- a table to paste into the issue ----
+    if args.markdown:
+        with open(args.markdown, "w") as fh:
+            fh.write("| exit | arm | n | dn p10 | dn p50 | dn p90 | up p50 | floor% | rtt ms | jit ms | loss% | disc% | relays |\n")
+            fh.write("|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n")
+            for ex in exits:
+                for arm, g in sorted(by_arm.items()):
+                    ss = [s for s in g["sessions"] if s.get("dest") == ex]
+                    if not ss:
+                        continue
+                    meds = [s["down_median"] for s in ss]
+                    fh.write("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n".format(
+                        ex, arm, len(ss),
+                        fmt(pct(meds,10)), fmt(pct(meds,50)), fmt(pct(meds,90)),
+                        fmt(med([s['up_median'] for s in ss if s.get('up_median') is not None])),
+                        fmt(sum(1 for m in meds if m < args.floor_mbps)/len(meds)*100,1),
+                        fmt(med([s['ping_rtt_ms'] for s in ss if s.get('ping_rtt_ms') is not None]),1),
+                        fmt(med([s['ping_jitter_ms'] for s in ss if s.get('ping_jitter_ms') is not None]),1),
+                        fmt(med([s['ping_loss_pct'] for s in ss if s.get('ping_loss_pct') is not None]),2),
+                        fmt((med([s['discard_rate'] for s in ss if s.get('discard_rate') is not None]) or 0)*100,2)
+                            if any(s.get('discard_rate') is not None for s in ss) else "-",
+                        fmt(med([s['relays'] for s in ss if s.get('relays') is not None]),1)
+                            if any(s.get('relays') is not None for s in ss) else "-"))
+        print()
+        print(f"Markdown table for the issue written to {args.markdown}")
 
     n_min = min((len(g["sessions"]) for g in by_arm.values()), default=0)
     if n_min < 30:

@@ -218,7 +218,33 @@ git push -u vm main
 ```
 
 Thereafter: edit → commit → `git push origin main` for the team, `git push vm main` to deploy.
-`git push origin main && git push vm main` when you want both.
+
+### Pushing to both at once
+
+```bash
+git config alias.pushall '!f() { b=$(git rev-parse --abbrev-ref HEAD); git push origin "$b" && git push vm "$b"; }; f'
+git pushall
+```
+
+GitHub first, VM second — deliberately. The VM is unreachable fairly often during tunnel testing,
+and this ordering means the commit is safely on GitHub before the deploy is attempted, with a failed
+deploy visible rather than silent.
+
+The alternative is one remote with two push URLs:
+
+```bash
+git remote add all git@github.com:hoprnet/gvpn-8408-bench.git
+git remote set-url --add --push all git@github.com:hoprnet/gvpn-8408-bench.git
+git remote set-url --add --push all gvpn-vm:gvpn-8408
+git push all main
+```
+
+**The moment any `--push` URL is added, the remote's fetch URL stops being used for pushes** — which
+is why GitHub has to be listed explicitly as the first one. Adding the VM to an existing `origin`
+without re-adding GitHub is a common way to make commits quietly stop reaching GitHub, and it also
+makes `git push origin main` mean something different from what the rest of the team expects.
+
+`git remote -v` shows what you actually have; the `(push)` lines are the ones that matter.
 
 **Check what you are about to publish.** `.gitignore` already excludes `faucet-codes`,
 `bench-runs/`, `arms/` and `BUILD.txt`, but a private repo is still a place secrets go to live
