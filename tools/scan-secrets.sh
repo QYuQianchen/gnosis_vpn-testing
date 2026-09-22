@@ -32,37 +32,64 @@
 #
 #       safe_address: "0xFILL_ME_IN"   # scan-secrets: allow
 #
+# PORTABILITY: this is the one script in the kit that runs on a laptop as well as
+# on the VM, because it is wired in as a pre-commit hook. macOS still ships bash
+# 3.2 (the last GPLv2 release), so no `mapfile`, no associative arrays, and no
+# `${var^^}`. Keep it to bash 3.2 and to flags BSD and GNU both understand -- a
+# pre-commit hook that errors is a pre-commit hook everyone disables.
 set -uo pipefail
 
 MODE=staged
-[ "${1:-}" = "--tracked" ] && MODE=tracked
-[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { sed -n '2,40p' "$0"; exit 0; }
+case "${1:-}" in
+  --tracked)  MODE=tracked ;;
+  -h|--help)  sed -n '2,45p' "$0"; exit 0 ;;
+  "")         ;;
+  *)          echo "unknown option: $1" >&2; exit 2 ;;
+esac
 
 ALLOW='scan-secrets: allow'
 
 # Deliberately not anchored: an address is just as dangerous mid-sentence.
-PATTERNS=(
+# A match on one of these IS an address or a key. There is no way to tell a
+# "placeholder" 40-hex string from a real one by looking at it, so nothing
+# exempts these except an explicit allow marker on the line. An earlier version
+# tried to be clever -- it treated a line as benign if it contained a shell
+# variable or one of a few known placeholder prefixes -- and that let
+# `0xdeadbeef...` through, because the prefix `0xdead` was on the list. The test
+# that caught it is in this file's header. Per-line heuristics over per-match
+# ones are how a scanner develops a blind spot.
+VALUE_PATTERNS=(
   '0x[0-9a-fA-F]{64}'
   '0x[0-9a-fA-F]{40}'
-  '\b(12D3Koo|16Uiu2H)[A-Za-z0-9]{20,}'
-  '^\s*(safe|module)_address\s*:'
+  '(12D3Koo|16Uiu2H)[A-Za-z0-9]{20,}'
 )
 
-# Lines that match a pattern but are obviously not an address. Without this the
-# generator's own `safe_address: "$SAFE_ADDR"` trips the scan on every commit,
-# and a check that cries wolf every time is a check people learn to bypass with
-# --no-verify -- which is worse than not having it.
-BENIGN='\$[A-Za-z_{]|@[A-Z_]+@|FILL_ME_IN|0x\.\.\.|0xRELAY|0xdead|<[A-Za-z_]+>'
+# The KEY on its own, for a file that names an address without one being visible
+# (a truncated log, a template). Here a placeholder value is genuinely common --
+# the generator writes `safe_address: "$SAFE_ADDR"` and the templates carry
+# `@RELAY@` -- so this one pattern does take the exemptions below.
+KEY_PATTERN='^[[:space:]]*(safe|module)_address[[:space:]]*:'
+KEY_BENIGN='\$[A-Za-z_{]|@[A-Z_]+@|FILL_ME_IN|<[A-Za-z_]+>'
 
-if [ "$MODE" = tracked ]; then
-  mapfile -t FILES < <(git ls-files)
-else
-  mapfile -t FILES < <(git diff --cached --name-only --diff-filter=ACMR)
-fi
-[ "${#FILES[@]}" -gt 0 ] || exit 0
+list_files() {
+  if [ "$MODE" = tracked ]; then
+    git ls-files
+  else
+    git diff --cached --name-only --diff-filter=ACMR
+  fi
+}
 
+# A newline-separated string rather than an array: bash 3.2 has no mapfile, and
+# expanding an empty array under `set -u` is an error there too. Filenames with
+# newlines would break this, but git does not produce them here and a commit
+# containing one is its own problem.
+#
+# The file list comes in on fd 3, not stdin: the inner loop below reads the
+# matching lines on stdin, and sharing one descriptor between two nested loops
+# is how a scan silently stops after its first file.
 hits=0
-for f in "${FILES[@]}"; do
+while IFS= read -r f <&3; do
+  [ -n "$f" ] || continue
   [ -f "$f" ] || continue
   case "$f" in
     tools/scan-secrets.sh) continue ;;          # this file describes the patterns
@@ -74,20 +101,22 @@ for f in "${FILES[@]}"; do
   # matches several patterns, and printing it three times makes a two-problem
   # commit look like a six-problem one.
   found=$(
-    for p in "${PATTERNS[@]}"; do
+    for p in "${VALUE_PATTERNS[@]}"; do
       grep -nE "$p" "$f" 2>/dev/null
-    done | sort -t: -k1,1n -u
+    done
+    # Key lines are reported only when the value is not a placeholder.
+    grep -nE "$KEY_PATTERN" "$f" 2>/dev/null | grep -vE "$KEY_BENIGN"
   )
+  found=$(printf '%s\n' "$found" | sort -t: -k1,1n -u)
   [ -n "$found" ] || continue
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in *"$ALLOW"*) continue ;; esac
-    printf '%s' "$line" | grep -qE "$BENIGN" && continue
     printf '  %s:%s\n' "$f" "$line"
     hits=$((hits + 1))
   done <<< "$found"
-done
+done 3< <(list_files)
 
 if [ "$hits" -gt 0 ]; then
   cat >&2 <<EOF

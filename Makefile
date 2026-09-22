@@ -21,7 +21,7 @@ RUN ?= $(shell ls -1dt $(STATE)/runs/*/ 2>/dev/null | head -1)
 
 help:
 	@echo "make hooks         install the pre-commit secret scan (once per clone)"
-	@echo "make test          run the analyzer tests against fabricated runs"
+	@echo "make test          run the scanner and analyzer tests"
 	@echo "make push          push $(BRANCH) to $(ORIGIN) and $(VM)"
 	@echo "make status        what is installed and whether a run is in progress"
 	@echo "make backup        encrypted, verified identity backup      [VM, sudo]"
@@ -42,6 +42,8 @@ hooks:
 	@./tools/install-hooks.sh
 
 test:
+	@./tests/run-scan-tests.sh
+	@echo
 	@./tests/run-analyze-tests.sh
 
 # One command, two remotes. `&&` rather than `;` on purpose: if GitHub rejects the

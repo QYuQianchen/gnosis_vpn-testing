@@ -48,8 +48,14 @@ measurement method, the analysis, the profiles. Not for docs or comments.
   them into the state directory where they belong. Idempotent; deletes nothing.
 - **`studies/`** — one tracked config per experiment, named in the report.
 - **`results/`** — committed reports (markdown, summary.csv, manifest.json).
-- **`tests/`** — the analyzer is checked against fabricated runs, including the
-  case where the pin silently failed to take.
+- **`tests/`** — `make test` runs two suites. The analyzer is checked against
+  fabricated runs, including the case where the pin silently failed to take. The
+  secret scanner is checked against known leaks, under a shell with `mapfile`
+  removed, because the pre-commit hook runs on macOS where bash is still 3.2.
+  Two of its cases are regressions that shipped: a real address beginning
+  `0xdead` was exempt (the benign-list was applied per line rather than per
+  match), and only the first file of a commit was scanned (nested read loops
+  shared stdin).
 - **`lib/common.sh`** — one resolution of kit root, state dir and config, which
   fixes a latent bug: under `sudo`, `$HOME` is `/root`, so a `$HOME`-relative
   state path would have produced two state directories depending on invocation.
