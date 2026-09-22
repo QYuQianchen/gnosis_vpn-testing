@@ -43,6 +43,9 @@ measurement method, the analysis, the profiles. Not for docs or comments.
   before reading the identity, verifies the archive by decrypting it, and on
   restore checks the archive before touching anything and keeps the identity it
   replaces.
+- **`tools/fix-worktree-ownership.sh`** (`make fix-perms`) — clears the
+  root-owned leftovers that block the first deploy after the restructure, moving
+  them into the state directory where they belong. Idempotent; deletes nothing.
 - **`studies/`** — one tracked config per experiment, named in the report.
 - **`results/`** — committed reports (markdown, summary.csv, manifest.json).
 - **`tests/`** — the analyzer is checked against fabricated runs, including the
