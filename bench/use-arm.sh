@@ -23,9 +23,11 @@
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
-[ -r "$KIT/gvpn.conf" ] && { set -a; . "$KIT/gvpn.conf"; set +a; }
+. "$KIT/lib/common.sh"
 
-ARMS_DIR="${GVPN_ARMS_DIR:-$KIT/arms}"
+# Rendered instances in the state directory, not the repo's templates: a template
+# has no config.toml and no addresses, so it cannot be installed.
+ARMS_DIR="$GVPN_ARMS_DIR"
 CONFIG_PATH="${GNOSISVPN_CONFIG_PATH:-/etc/gnosisvpn/config.toml}"
 HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
 DROPIN="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf"
@@ -49,7 +51,7 @@ Usage: sudo $0 ARM [--count] [--dest ID]
   --settle S    seconds to let traffic run before counting (default: $SETTLE)
   --show        print what is currently installed, then exit
 
-Available arms:
+Available arms (rendered instances in $ARMS_DIR):
 $(ls "$ARMS_DIR" 2>/dev/null | sed 's/^/  /' || echo "  (none -- run setup/02-make-arms.sh)")
 EOF
 }

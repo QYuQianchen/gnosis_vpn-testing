@@ -2,27 +2,65 @@
 
 Pinned vs. automatic path finding on Gnosis VPN, on a clean Contabo Ubuntu VM.
 
+## Layout
+
+Two trees, and the split between them is the whole design: **the repo holds what
+re-creates an experiment; the state directory holds what an experiment produces
+or what identifies this node.** Nothing valuable is inside the worktree, because
+a deploy rewrites the worktree.
+
 ```
-setup/00-vm-setup.sh       prepare the VM under test        (run as root, on the VM)
-setup/01-iperf-server.sh   far-end load generator           (run as root, on a 2nd VPS)
-setup/02-make-arms.sh      generate the arm configurations  (run as root, on the VM)
-setup/03-fetch-sources.sh  clone the pinned sources         (optional — reading code / Phase 4)
-setup/04-build-patched.sh  build from source                (optional — Phase 4 only)
-setup/05-set-version.sh    switch / pin the client build    (reads gvpn.conf)
-setup/06-git-deploy.sh     make the VM a git push target    (run once, on the VM)
-                           in-place by default; --bare for a separate repo dir
-bench/use-arm.sh           install one arm by hand; --count checks the pin took
-bench/gvpn-bench.sh        the interleaved A/B runner
-bench/gvpn-analyze.py      per-arm comparison and variance decomposition
-docs/plan.md               the full test plan
-docs/deploy.md             uploading, fetching source, building
-docs/dev-workflow.md       ssh keys, push-to-deploy, switching the client build
-gvpn.conf                  every knob in one version-controlled place
+gvpn-8408/                      the repo — safe to force-checkout at any moment
+  Makefile                      the commands you'd otherwise retype
+  CHANGELOG.md                  what changed between runs; a result cites a kit rev
+  gvpn.conf                     defaults: channel, network, version, load source
+  studies/<date>-<name>.conf    one tracked file per experiment, named in its report
+  arms/<name>/                  arm TEMPLATES — prose, hop count, planner body.
+                                No addresses, so they are tracked and diffable.
+  lib/common.sh                 kit root, state dir, config loading — sourced by all
+  setup/00-vm-setup.sh          prepare the VM under test          [VM, root]
+       01-iperf-server.sh       far-end load generator             [optional 2nd VPS]
+       02-make-arms.sh          render templates into the state dir [VM, root]
+       03-fetch-sources.sh      clone the pinned sources           [optional]
+       04-build-patched.sh      build from source                  [Phase 4 only]
+       05-set-version.sh        switch / pin the client build
+       06-git-deploy.sh         make the VM a git push target      [once, on the VM]
+  bench/use-arm.sh              install one arm by hand; --count checks the pin took
+        gvpn-bench.sh           the interleaved A/B runner
+        gvpn-analyze.py         the report: verdict, tables, --markdown for the issue
+  tools/scan-secrets.sh         refuses to commit an address or peer ID
+        install-hooks.sh        wires it in as pre-commit (once per clone)
+  tests/run-analyze-tests.sh    checks the report against fabricated runs
+  results/<study>/              COMMITTED: report.md, summary.csv, manifest.json
+  docs/                         plan.md, deploy.md, dev-workflow.md, migration.md
 ```
 
-**`gvpn.conf` is the one file to edit.** Channel, network, pinned version, destination, load
-source and log rotation all live there; the setup scripts source it and export it, so the bench
-script inherits the same values. Flags still override it.
+```
+~/gvpn-state/                   never tracked, never inside the worktree
+  runs/                         raw output — GBs of planner DEBUG logging
+  arms/<name>/                  RENDERED arms, carrying safe + module addresses
+  secrets/                      faucet codes
+  identity-backup/              encrypted identity archives
+  run.lock -> runs/<id>         exists while a run is in progress; blocks deploys
+```
+
+Three consequences worth knowing before you touch anything:
+
+- **`arms/` in the repo is not runnable.** A template has no `config.toml` and no
+  addresses. `make arms` renders it into `~/gvpn-state/arms`, which is what
+  `use-arm.sh` and `gvpn-bench.sh` read. Editing a planner setting is a commit,
+  which is the point — a silent change invalidates every comparison after it.
+- **A push is rejected while a run is in progress.** `push-to-checkout` rewrites
+  script files in place and bash reads a script as it executes, so deploying
+  mid-soak can corrupt the running bench or swap the analysis under a half-done
+  study. Wait, or `rm ~/gvpn-state/run.lock` if it is stale.
+- **Run `make hooks` once per clone**, on every machine you commit from. Git does
+  not sync hooks, and the realistic way an address reaches the repo is a log
+  excerpt pasted into a doc, which no `.gitignore` can catch.
+
+**`gvpn.conf` is the one file to edit for defaults**; a `studies/*.conf` overrides
+it for one experiment. The setup scripts source and export both, so the bench
+script inherits the same values. Flags still override everything.
 
 **The benchmark needs no build.** The client is installed from APT and every pinned arm is pure
 configuration. `03` and `04` exist for reading the code while interpreting results, and for the
@@ -33,7 +71,8 @@ optional Phase 4 patch. See `docs/deploy.md`.
 - The Contabo VM (≥ 4 vCPU, ≥ 8 GB RAM, ≥ 40 GB disk — DEBUG logging is hungry).
 - Optionally a second VPS for iperf3 — **not required**. `--target url` runs the whole
   comparison from the one VM, loss and jitter included. See "Load source" below.
-- Faucet codes, one per allowlist-pinned relay you want to test (`./faucet-codes`, one per line).
+- Faucet codes, one per allowlist-pinned relay you want to test
+  (`~/gvpn-state/secrets/faucet-codes`, one per line — outside the repo).
 - Console access to the VM (Contabo VNC) as the last resort if the tunnel eats your SSH.
 
 ## Order of operations
@@ -55,22 +94,59 @@ gnosis_vpn-ctl connect UK
 gnosis_vpn-ctl disconnect
 
 # --- arms ------------------------------------------------------------------
-sudo ./setup/02-make-arms.sh --out ./arms --destination UK
-# validate the manual hopr-lib config loads (02-make-arms.sh prints the steps)
+make arms                                  # renders templates -> ~/gvpn-state/arms
+sudo ./bench/use-arm.sh pin-planner --count   # MUST read 1; auto MUST read many
 
 # 10-minute rig check -- no second machine needed
-sudo ./bench/gvpn-bench.sh --target url --profile smoke --arms-dir ./arms
-python3 ./bench/gvpn-analyze.py ./bench-runs/<newest>
+make smoke
+make report
 
 # the real run, unattended
-sudo ./bench/gvpn-bench.sh --target url --profile soak --arms-dir ./arms --detach
+make soak STUDY=2026-09-22-pin-vs-auto
+make status                                # is it still going?
+make report                                # when it finishes
+make publish STUDY=2026-09-22-pin-vs-auto  # promote it into results/ to commit
 
 # --- optional: a second VPS adds upload, iperf3 UDP and sender-CC control ---
 sudo ./setup/01-iperf-server.sh --allow-from <VM_PUBLIC_IP>     # on that box
-sudo ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --arms-dir ./arms --detach
+sudo -E ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --detach
 ```
 
 `--dry-run` on any profile prints the schedule and estimated wall clock before committing.
+
+## Reading the result
+
+```sh
+make report                    # newest run, floor 5, writes report.md beside it
+# or explicitly:
+python3 ./bench/gvpn-analyze.py ~/gvpn-state/runs/<newest> \
+        --floor-mbps 5 --markdown ~/gvpn-state/runs/<newest>/report.md
+```
+
+The report opens with a verdict in words and four numbers, and only then shows the
+tables behind it. The first fifteen lines are the answer; everything after them is
+for whoever wants to argue with it.
+
+Three things to know before you quote a number from it:
+
+- **The floor threshold comes from the study file, not the command line.** Set
+  `GVPN_FLOOR_MBPS` in `studies/<name>.conf` before the run — take `auto`'s p25
+  from the quick run — and the bench records it in the manifest, which is what
+  `make report` then uses. `--floor-mbps` still overrides it, and the report
+  prints a caveat saying it was overridden. Choosing the threshold after seeing
+  the pinned arm turns the headline number into whatever you wanted.
+- **The bracketed ranges are 90% bootstrap confidence intervals.** A p10 over a
+  few dozen sessions is a single order statistic; it moves. An interval that spans
+  zero means the arms are indistinguishable at that sample size, however large the
+  percentage in front of it looks. The verdict line says so in words.
+- **Check `distinct routes` reads 1.0 for the pinned arm.** If it does not, the
+  manual hopr-lib config was never loaded and the run compared `auto` with itself.
+  The report refuses to claim a result in that case, but it is worth knowing why.
+
+`--markdown` writes the same thing as a file that can be pasted into #8408
+unedited — verdict, per-arm table, per-exit table, the evidence table, and a
+collapsed glossary so a reader does not have to ask what `p90/p10` means.
+`--no-diagnostics` trims it to the headline and per-exit tables.
 
 ## The arms
 

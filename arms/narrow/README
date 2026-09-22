@@ -1,0 +1,4 @@
+MIDDLE GROUND. Three candidates instead of fifty, weights untempered so the best
+one dominates, no blind exploration. If this recovers most of pin-planner's
+benefit, there is a shippable setting that keeps some relay diversity -- which
+matters, because diversity is a privacy and resilience property, not just cost.

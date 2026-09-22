@@ -1,10 +1,33 @@
-# Data and state that must survive a deploy — the post-receive hook uses
-# `checkout -f`, which only replaces TRACKED files, so keeping these untracked
-# is what stops a push from destroying a run in progress.
+# Nothing valuable should be inside this worktree in the first place -- runs,
+# generated arms, faucet codes and identity backups live in $GVPN_STATE
+# (~/gvpn-state by default), outside the repo, because a push-to-checkout deploy
+# rewrites the worktree and `git clean -fdx` empties it.
+#
+# These entries are a second line of defence for the old layout and for anything
+# written here by hand. The FIRST line is tools/scan-secrets.sh, which refuses to
+# commit an address even in a file that is supposed to be tracked.
+
+# --- pre-restructure locations, kept so an un-migrated VM stays safe ---------
 bench-runs/
-arms/
 faucet-codes
 faucet-codes.used
 BUILD.txt
+
+# --- state that must never be tracked ---------------------------------------
+gvpn-state/
+*.safe
+hopr.yaml
+*.identity
+
+# arms/ IS tracked: it holds templates, which carry no addresses. Rendered
+# instances go to $GVPN_STATE/arms. This catches a rendered one written here by
+# mistake -- a template has no config.toml.
+arms/*/config.toml
+arms/*/hopr.yaml
+arms/*/env
+arms/*/.template
+
+# --- noise ------------------------------------------------------------------
 __pycache__/
 *.pyc
+.DS_Store

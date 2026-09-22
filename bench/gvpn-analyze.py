@@ -26,15 +26,29 @@ Reads a gvpn-bench.sh run directory and answers three questions:
 Also reported: frame discard rate from the client's own telemetry, and how many
 distinct routes the planner actually drew from (needs planner DEBUG logging).
 
-Usage:  python3 gvpn-analyze.py RUN_DIR [--floor-mbps 2.0] [--csv rows.csv]
+THE OUTPUT IS A DOCUMENT, NOT A DUMP. It opens with a verdict in words and three
+numbers, and only then shows the tables that support it. Anyone should be able to
+read the first fifteen lines and know the answer; the rest is there for whoever
+wants to argue with it. `--markdown` writes the same thing as a file that can be
+pasted into the issue unedited.
+
+Comparisons carry 90% bootstrap confidence intervals. A p10 over a few dozen
+sessions is one order statistic and moves around a lot, so without an interval
+there is no way to tell a real change in the floor from one unlucky session.
+
+Usage:  python3 gvpn-analyze.py RUN_DIR [--floor-mbps 5] [--markdown report.md]
+                                        [--csv rows.csv] [--no-diagnostics]
 """
 
 import argparse
 import csv
+import datetime as dt
 import json
+import random
 import re
 import statistics as st
 import sys
+import textwrap
 from pathlib import Path
 
 FLOOR_MBPS_DEFAULT = 2.0
@@ -259,14 +273,183 @@ def analyse_session(sdir: Path):
     }
 
 
+# ----------------------------------------------------------------- layout --
+#
+# Everything below is presentation. One Table class renders both the console and
+# the markdown export, so the two can never drift apart -- a report that says
+# something different from the terminal it came from is worse than no report.
+
+class Table:
+    """Fixed-width console table that can also emit itself as GitHub markdown."""
+
+    def __init__(self, cols, indent=2):
+        # cols: list of (title, align) where align is "<" (text) or ">" (number)
+        self.cols = cols
+        self.indent = indent
+        self.rows = []
+        self.rules = set()          # row indices to precede with a light rule
+
+    def row(self, *cells):
+        self.rows.append([("-" if c is None else str(c)) for c in cells])
+        return self
+
+    def divider(self):
+        self.rules.add(len(self.rows))
+        return self
+
+    def _widths(self):
+        w = [len(t) for t, _ in self.cols]
+        for r in self.rows:
+            for i, c in enumerate(r):
+                if i < len(w):
+                    w[i] = max(w[i], len(c))
+        return w
+
+    def render(self):
+        w = self._widths()
+        pad = " " * self.indent
+        gap = "  "
+        def line(cells):
+            return gap.join(f"{cells[j]:{self.cols[j][1]}{w[j]}}"
+                            for j in range(len(self.cols))).rstrip()
+
+        head = line([t for t, _ in self.cols])
+        body = [(i, line([r[j] if j < len(r) else "" for j in range(len(self.cols))]))
+                for i, r in enumerate(self.rows)]
+        width = max([len(head)] + [len(b) for _, b in body])
+        out = [pad + head, pad + "─" * width]
+        for i, b in body:
+            if i in self.rules:
+                out.append(pad + "·" * width)
+            out.append(pad + b)
+        return out
+
+    def markdown(self):
+        out = ["| " + " | ".join(t for t, _ in self.cols) + " |",
+               "|" + "|".join("---" if a == "<" else "--:" for _, a in self.cols) + "|"]
+        for r in self.rows:
+            out.append("| " + " | ".join(
+                (r[j] if j < len(r) else "") for j in range(len(self.cols))) + " |")
+        return out
+
+
+def banner(title, sub=None, width=78):
+    out = ["", "═" * width, "  " + title]
+    if sub:
+        out.append("  " + sub)
+    out += ["═" * width, ""]
+    return out
+
+
+def section(n, title, note=None, width=78):
+    out = ["", f"  {n}  {title}", "  " + "─" * (width - 2)]
+    if note:
+        out += ["     " + l for l in textwrap.wrap(note, width - 6)]
+    out.append("")
+    return out
+
+
+def kv(label, value, lw=26):
+    """One aligned line of the verdict block, so the arrows form a column."""
+    return f"            {label:<{lw}}{value}"
+
+
+def human_dur(seconds):
+    if seconds is None or seconds < 0:
+        return None
+    h, m = divmod(int(seconds) // 60, 60)
+    return f"{h} h {m:02d} m" if h else f"{m} m"
+
+
+def signed_pct(x, nd=0):
+    return "-" if x is None else f"{x:+.{nd}f}%"
+
+
+# ------------------------------------------------------------- statistics --
+
+def boot_rel_ci(base, arm, statfn, n=2000, conf=90, seed=8408):
+    """Percentile-bootstrap CI for statfn(arm) vs statfn(base), as a percentage.
+
+    The point estimate of a p10 is a single order statistic over a few dozen
+    sessions, so it moves around a lot. Without an interval a reader cannot tell
+    a real floor improvement from one unlucky session in the baseline -- and
+    that distinction is the entire finding this issue is asking for.
+    """
+    base = [x for x in base if x is not None]
+    arm = [x for x in arm if x is not None]
+    if len(base) < 8 or len(arm) < 8:
+        return None
+    rnd = random.Random(seed)
+    out = []
+    for _ in range(n):
+        b = statfn([base[rnd.randrange(len(base))] for _ in base])
+        a = statfn([arm[rnd.randrange(len(arm))] for _ in arm])
+        if b:
+            out.append((a / b - 1.0) * 100.0)
+    if len(out) < n // 2:
+        return None
+    out.sort()
+    tail = (100 - conf) / 200.0
+    return (out[int(len(out) * tail)], out[min(len(out) - 1, int(len(out) * (1 - tail)))])
+
+
+def ci_str(ci, point):
+    if point is None:
+        return "-"
+    if ci is None:
+        return f"{point:+.0f}%"
+    return f"{point:+.0f}%  ({ci[0]:+.0f} … {ci[1]:+.0f})"
+
+
+def ci_verdict(ci):
+    """-1 worse, 0 indistinguishable, +1 better, None unknown."""
+    if ci is None:
+        return None
+    if ci[0] > 0:
+        return 1
+    if ci[1] < 0:
+        return -1
+    return 0
+
+
 # ----------------------------------------------------------------- report --
 
+def arm_stats(sessions, floor_mbps):
+    meds = [s["down_median"] for s in sessions]
+    ups = [s["up_median"] for s in sessions if s.get("up_median") is not None]
+    p10, p50, p90 = pct(meds, 10), pct(meds, 50), pct(meds, 90)
+    return {
+        "n": len(sessions),
+        "meds": meds,
+        "p10": p10, "p50": p50, "p90": p90,
+        "up": med(ups),
+        "floor": sum(1 for m in meds if m < floor_mbps) / len(meds) * 100 if meds else None,
+        "spread": (p90 / p10) if (p10 and p90) else None,
+        "secs": med([s["down_seconds"] for s in sessions if s.get("down_seconds")]),
+        "rtt": med([s["ping_rtt_ms"] for s in sessions if s.get("ping_rtt_ms") is not None]),
+        "jit": med([s["ping_jitter_ms"] for s in sessions if s.get("ping_jitter_ms") is not None]),
+        "loss": med([s["ping_loss_pct"] for s in sessions if s.get("ping_loss_pct") is not None]),
+        "disc": med([s["discard_rate"] for s in sessions if s.get("discard_rate") is not None]),
+        "relays": med([s["relays"] for s in sessions if s.get("relays") is not None]),
+    }
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Summarise a gvpn-bench.sh run into a report for hoprnet#8408.")
     ap.add_argument("run_dir")
-    ap.add_argument("--floor-mbps", type=float, default=FLOOR_MBPS_DEFAULT)
+    # Default None, resolved below against the manifest. "Below the floor" only
+    # means something against a threshold chosen BEFORE anyone saw the pinned
+    # arm; letting it default at analysis time is how the headline number becomes
+    # whatever the analyst wanted.
+    ap.add_argument("--floor-mbps", type=float, default=None,
+                    help="a session median below this counts as a performance floor; "
+                         "defaults to the value the study recorded in the manifest")
+    ap.add_argument("--baseline", default="auto", help="arm to compare everything against")
     ap.add_argument("--csv", help="write per-session rows here")
-    ap.add_argument("--markdown", help="write a GitHub-ready comparison table here")
+    ap.add_argument("--markdown", help="write a complete issue-ready report here")
+    ap.add_argument("--no-diagnostics", action="store_true",
+                    help="headline and per-exit only; skip the supporting evidence")
     args = ap.parse_args()
 
     run = Path(args.run_dir)
@@ -279,7 +462,32 @@ def main():
             manifest = json.loads((run / "manifest.json").read_text())
         except Exception:
             pass
+    finished = {}
+    if (run / "finished.json").exists():
+        try:
+            finished = json.loads((run / "finished.json").read_text())
+        except Exception:
+            pass
     mode = manifest.get("mode", "time")
+    BASE = args.baseline
+
+    # Floor threshold: what the study declared, unless explicitly overridden here.
+    recorded_floor = None
+    try:
+        recorded_floor = float(manifest.get("floor_mbps") or "")
+    except (TypeError, ValueError):
+        pass
+    floor_note = None
+    if args.floor_mbps is None:
+        args.floor_mbps = recorded_floor if recorded_floor else FLOOR_MBPS_DEFAULT
+        if not recorded_floor:
+            floor_note = (f"No floor threshold was recorded for this run; using the "
+                          f"default {FLOOR_MBPS_DEFAULT:g} Mbit/s. Set GVPN_FLOOR_MBPS in "
+                          f"the study file so the threshold is fixed before the run.")
+    elif recorded_floor and abs(recorded_floor - args.floor_mbps) > 1e-9:
+        floor_note = (f"Floor threshold overridden on the command line "
+                      f"({args.floor_mbps:g}); the study recorded {recorded_floor:g}. "
+                      f"Say which one a quoted 'below' figure used.")
 
     by_arm, rows = {}, []
 
@@ -301,226 +509,480 @@ def main():
             bucket(arm)["sessions"].append(s)
             rows.append(s)
 
-    if args.csv and rows:
+    if not rows:
+        sys.exit("no usable sessions in this run")
+
+    if args.csv:
         flat = [{k: v for k, v in r.items() if k not in ("reps", "rep_medians")} for r in rows]
         with open(args.csv, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=sorted({k for r in flat for k in r}))
             w.writeheader()
             w.writerows(flat)
 
-    # ---- headline table ----
-    print()
-    if mode == "bytes":
-        print(f"Mode: bytes -- {manifest.get('dl_bytes','?')} per download, "
-              f"{manifest.get('reps','?')} rep(s) per session, "
-              f"{manifest.get('rep_gap_s','?')}s apart.")
-        print("Headline: secs (completion time, lower better), p10, floor%.")
+    stats = {a: arm_stats(g["sessions"], args.floor_mbps)
+             for a, g in by_arm.items() if g["sessions"]}
+    arms_sorted = ([BASE] if BASE in stats else []) + sorted(a for a in stats if a != BASE)
+    exits = sorted({s.get("dest", "-") for s in rows})
+    per_exit_delta = []          # (exit, rtt_ms, champion p10 delta %)
+
+    # ---------------------------------------------------------- the verdict --
+
+    base_meds = stats[BASE]["meds"] if BASE in stats else None
+    champion, ci10, ci50, d10, d50 = None, None, None, None, None
+
+    if base_meds:
+        cands = [a for a in stats if a != BASE]
+        if cands:
+            champion = max(cands, key=lambda a: ((stats[a]["p10"] or 0),
+                                                 -(stats[a]["floor"] or 100)))
+            cm = stats[champion]["meds"]
+            p10f = lambda xs: pct(xs, 10)
+            p50f = lambda xs: pct(xs, 50)
+            if stats[BASE]["p10"]:
+                d10 = (stats[champion]["p10"] / stats[BASE]["p10"] - 1) * 100
+            if stats[BASE]["p50"]:
+                d50 = (stats[champion]["p50"] / stats[BASE]["p50"] - 1) * 100
+            ci10 = boot_rel_ci(base_meds, cm, p10f)
+            ci50 = boot_rel_ci(base_meds, cm, p50f)
+
+    v10 = ci_verdict(ci10)
+    floor_base = stats[BASE]["floor"] if BASE in stats else None
+    floor_champ = stats[champion]["floor"] if champion else None
+
+    # The pin not taking is not a result with a caveat, it is the absence of a
+    # result: both arms ran the same routing. That has to outrank every other
+    # verdict, or someone reads a table comparing an arm with itself.
+    pin_broken = (champion is not None
+                  and stats[champion]["relays"] is not None
+                  and stats[champion]["relays"] > 1.5)
+
+    if champion is None:
+        headline = f"Only one arm in this run — nothing to compare against '{BASE}'."
+    elif pin_broken:
+        headline = (f"THE PIN DID NOT TAKE — '{champion}' still drew from "
+                    f"{stats[champion]['relays']:.1f} routes. This run compares "
+                    f"'{BASE}' with itself; the numbers below mean nothing.")
+    elif v10 is None:
+        headline = ("Too few sessions to separate the arms. "
+                    "Treat this as a signal check, not a result.")
+    elif v10 > 0 and floor_champ is not None and floor_champ < floor_base:
+        headline = f"Pinning the path RAISES the performance floor ('{champion}' vs '{BASE}')."
+    elif v10 > 0:
+        headline = (f"'{champion}' lifts the slow tail, but the share of floored "
+                    f"sessions is not clearly lower.")
+    elif v10 < 0:
+        headline = f"Pinning the path makes the slow tail WORSE ('{champion}' vs '{BASE}')."
+    elif d10 is not None and abs(d10) > 15:
+        # A large point estimate with an interval that still includes zero is the
+        # easiest result in this whole exercise to over-claim. Say both halves.
+        headline = (f"Suggestive but NOT conclusive: '{champion}' measures "
+                    f"{d10:+.0f}% on the slow tail, but the interval still includes "
+                    f"no change. Needs more sessions before it can be reported.")
     else:
-        print(f"Mode: time -- {manifest.get('dl_seconds','?')}s per download, "
-              f"{manifest.get('reps','?')} rep(s) per session, "
-              f"{manifest.get('rep_gap_s','?')}s apart.")
-        print("Headline: p10, floor%, spread.")
-    print(f"Throughput in Mbit/s. Floor threshold: {args.floor_mbps} Mbit/s session median.")
-    print()
+        headline = ("No measurable difference in the slow tail. "
+                    "Path diversity is not what produces the floors.")
 
-    hdr = (f"{'arm':<16}{'n':>4}{'fail':>5}{'to':>4}{'secs':>8}"
-           f"{'p10':>8}{'p50':>8}{'p90':>8}{'floor%':>8}{'spread':>8}{'mean':>8}")
-    print(hdr)
-    print("-" * len(hdr))
+    W = 78
+    out = []
+    out += banner("hoprnet#8408 — pinned path vs. automatic path finding",
+                  "download throughput unless stated otherwise; Mbit/s", W)
+    for i, line in enumerate(textwrap.wrap(headline, W - 14)):
+        out.append(("  VERDICT   " if i == 0 else "            ") + line)
+    out.append("")
 
-    for arm in sorted(by_arm):
-        g = by_arm[arm]
-        ss = g["sessions"]
-        if not ss:
-            print(f"{arm:<16}{0:>4}{g['failed']:>5}" + "      -" * 11)
-            continue
-        meds = [s["down_median"] for s in ss]
-        floor = sum(1 for m in meds if m < args.floor_mbps) / len(meds) * 100
-        print(
-            f"{arm:<16}{len(ss):>4}{g['failed']:>5}"
-            f"{sum(s['timed_out_reps'] for s in ss):>4}"
-            f"{fmt(med([s['down_seconds'] for s in ss if s['down_seconds']]), 1):>8}"
-            f"{fmt(pct(meds, 10)):>8}{fmt(pct(meds, 50)):>8}{fmt(pct(meds, 90)):>8}"
-            f"{fmt(floor, 1):>8}"
-            f"{fmt(med([s['tail_spread'] for s in ss if s['tail_spread']]), 1):>8}"
-            f"{fmt(st.mean(meds)):>8}"
-        )
+    if champion:
+        b, c = stats[BASE], stats[champion]
+        out.append(kv("", f"{BASE:>12}  →  {champion:<14}"))
 
-    # ---- path quality: everything measured with NO congestion controller in the
-    # loop. This is what separates "the path is losing packets" from "TCP is
-    # overreacting to loss" -- and it decides whether the fix is the reassembly
-    # window or more relay capacity.
-    def col(ss, key, scale=1.0, nd=2):
-        vals = [s[key] for s in ss if s.get(key) is not None]
-        return fmt(med(vals) * scale, nd) if vals else "-"
+        def arrow(lo, hi, nd=2, suffix=""):
+            return f"{fmt(lo, nd) + suffix:>12}  →  {fmt(hi, nd) + suffix:<14}"
 
-    print()
-    print("Path quality -- no congestion control in any of these:")
-    q = (f"  {'arm':<16}{'disc%':>8}{'retx':>8}{'ploss%':>8}{'pjit_ms':>9}"
-         f"{'prtt_ms':>9}{'uloss%':>8}{'ujit_ms':>9}{'relays':>8}")
-    print(q)
-    print("  " + "-" * (len(q) - 2))
-    for arm in sorted(by_arm):
-        ss = by_arm[arm]["sessions"]
-        if not ss:
-            continue
-        print(
-            f"  {arm:<16}"
-            f"{col(ss, 'discard_rate', 100, 2):>8}"
-            f"{col(ss, 'retx', 1, 0):>8}"
-            f"{col(ss, 'ping_loss_pct', 1, 2):>8}"
-            f"{col(ss, 'ping_jitter_ms', 1, 1):>9}"
-            f"{col(ss, 'ping_rtt_ms', 1, 1):>9}"
-            f"{col(ss, 'udp_loss_pct', 1, 2):>8}"
-            f"{col(ss, 'udp_jitter_ms', 1, 1):>9}"
-            f"{col(ss, 'relays', 1, 1):>8}"
-        )
-    print()
-    print("  disc%   frames that arrived but missed the reassembly window (client telemetry)")
-    print("  ploss%/pjit_ms  loss and mdev jitter from the ping running THROUGH the tunnel")
-    print("                  during the transfer -- needs no far end, and measures under load")
-    print("  uloss%/ujit_ms  iperf3 UDP, when a --udp-host was configured")
-    print("  relays  distinct routes the planner drew from (needs planner DEBUG logging).")
-    print("          pin-planner should read 1.0; if it does not, the pin did not take.")
+        out.append(kv("slowest 10% of sessions",
+                      arrow(b["p10"], c["p10"]) + ci_str(ci10, d10)))
+        if floor_base is not None:
+            out.append(kv(f"sessions below {args.floor_mbps:g} Mbit/s",
+                          f"{floor_base:>11.0f}%  →  {f'{floor_champ:.0f}%':<14}"
+                          f"{floor_champ - floor_base:+.0f} points"))
+        out.append(kv("typical session (median)",
+                      arrow(b["p50"], c["p50"]) + ci_str(ci50, d50)))
+        out.append(kv("spread p90/p10", arrow(b["spread"], c["spread"], 1, "x")))
+        out.append("")
+        out.append("            Ranges are 90% bootstrap confidence intervals. One that spans 0")
+        out.append("            means the arms are indistinguishable at this sample size.")
+        out.append("")
 
-    # ---- variance decomposition ----
-    if any(s["within_cv"] is not None for g in by_arm.values() for s in g["sessions"]):
-        print()
-        print("Where the variance lives (coefficient of variation, lower = more stable):")
-        print(f"  {'arm':<16}{'between-session':>17}{'within-session':>16}{'verdict':>28}")
-        for arm in sorted(by_arm):
-            ss = by_arm[arm]["sessions"]
-            if len(ss) < 2:
-                continue
-            between = cv([s["down_median"] for s in ss])
-            within = med([s["within_cv"] for s in ss if s["within_cv"] is not None])
-            verdict = "-"
-            if between is not None and within is not None:
-                if within > 1.5 * between:
-                    verdict = "flickers inside a session"
-                elif between > 1.5 * within:
-                    verdict = "session is assigned its fate"
-                else:
-                    verdict = "both, comparably"
-            print(f"  {arm:<16}{fmt(between, 3):>17}{fmt(within, 3):>16}{verdict:>28}")
-        print()
-        print("  between >> within  -> what a session GETS (its channels, exit, SURB warm-up)")
-        print("                        decides its throughput; it then stays there. Look at")
-        print("                        which relays that session had channels to.")
-        print("  within >> between  -> throughput moves under a fixed session: the per-packet")
-        print("                        path draw or transient relay load. Look at frame")
-        print("                        discards and the distinct-relay count.")
+    # provenance
+    start = manifest.get("started") or ""
+    dur = None
+    if start and finished.get("finished"):
+        try:
+            t0 = dt.datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ")
+            t1 = dt.datetime.strptime(finished["finished"], "%Y-%m-%dT%H:%M:%SZ")
+            dur = human_dur((t1 - t0).total_seconds())
+        except Exception:
+            pass
+    bits = []
+    if manifest.get("study"):
+        bits.append(f"study {manifest['study']}")
+    if manifest.get("kit_rev"):
+        bits.append(f"kit {manifest['kit_rev']}")
+    bits.append(f"{len(rows)} sessions")
+    if dur:
+        bits.append(dur)
+    n_ex = len([e for e in exits if e != "-"]) or 1
+    bits.append(f"{n_ex} exit" + ("s" if n_ex > 1 else ""))
+    ver = manifest.get("client_package") or manifest.get("client_service")
+    if ver:
+        bits.append(f"client {ver}")
+    if manifest.get("network"):
+        bits.append(manifest["network"])
+    out.append("  RUN       " + " · ".join(bits))
+    load = (f"{manifest.get('dl_bytes')} bytes" if mode == "bytes"
+            else f"{manifest.get('dl_seconds')}s")
+    out.append(f"            {load} per transfer × {manifest.get('reps','?')} rep(s), "
+               f"{manifest.get('rep_gap_s','?')}s apart · started {start or '?'}")
+    if finished.get("exit") not in (None, 0):
+        out.append(f"            WARNING: the run exited non-zero ({finished['exit']}) — "
+                   f"it may have been cut short.")
+    out.append("")
 
-    # ---- rep trend: does a held-open session decay or recover? ----
-    max_reps = max((len(s["rep_medians"]) for g in by_arm.values() for s in g["sessions"]), default=0)
-    if max_reps > 1:
-        print()
-        print("Throughput by repeat within a held-open session (median Mbit/s):")
-        print(f"  {'arm':<16}" + "".join(f"{'rep' + str(i + 1):>9}" for i in range(max_reps)))
-        for arm in sorted(by_arm):
-            ss = by_arm[arm]["sessions"]
-            cells = ""
-            for i in range(max_reps):
-                vals = [s["rep_medians"][i] for s in ss if len(s["rep_medians"]) > i]
-                cells += f"{fmt(med(vals)):>9}"
-            print(f"  {arm:<16}{cells}")
-        print()
-        print("  A flat row means a session's throughput is a property of the session.")
-        print("  A falling row means it degrades while held open (SURB or channel drift).")
-        print("  A noisy row means each transfer re-draws its luck -- which is the")
-        print("  multipath-striping prediction.")
+    # ------------------------------------------------------- 1. headline --
 
-    # ---- paired per-cycle comparison ----
-    if "auto" in by_arm:
-        base = {s["cycle"]: s["down_median"] for s in by_arm["auto"]["sessions"]}
-        print()
-        print("Paired per-cycle delta vs. 'auto' (both arms saw the same minute of load):")
-        for arm in sorted(by_arm):
-            if arm == "auto":
-                continue
-            d = [s["down_median"] - base[s["cycle"]]
-                 for s in by_arm[arm]["sessions"] if s["cycle"] in base]
-            if d:
-                print(f"  {arm:<16} n={len(d):<4} median Δ = {st.median(d):+7.2f} Mbit/s   "
-                      f"beats auto in {sum(1 for x in d if x > 0) / len(d) * 100:.0f}% of cycles")
-        print()
-        print("Read the deltas with floor% above: an arm that loses a little median")
-        print("throughput while cutting floor% is the outcome this issue wants.")
+    out += section(1, "THROUGHPUT BY ARM",
+                   "The floor is the point of the exercise: read 'slow 10%' and "
+                   "'below' first, then check what the median cost was to get there.", W)
 
-    # ---- per exit: the comparison the issue actually asks for ----
-    exits = sorted({s.get("dest", "-") for g in by_arm.values() for s in g["sessions"]})
-    if len(exits) > 1 or (exits and exits[0] != "-"):
-        print()
-        print("Per exit node -- pinned vs auto, one block per exit.")
-        print("Mbit/s; dn = download, up = upload; rtt/jit from the in-tunnel ping.")
-        for ex in exits:
-            rows = [(arm, [s for s in g["sessions"] if s.get("dest") == ex])
-                    for arm, g in sorted(by_arm.items())]
-            rows = [(a, ss) for a, ss in rows if ss]
-            if not rows:
-                continue
-            print()
-            print(f"  exit: {ex}")
-            h = (f"    {'arm':<16}{'n':>4}{'dn_p10':>8}{'dn_p50':>8}{'dn_p90':>8}"
-                 f"{'up_p50':>8}{'floor%':>8}{'rtt_ms':>8}{'jit_ms':>8}{'loss%':>7}{'disc%':>7}{'relays':>7}")
-            print(h)
-            print("    " + "-" * (len(h) - 4))
-            base_med = None
-            for arm, ss in rows:
-                meds = [s["down_median"] for s in ss]
-                if arm == "auto":
-                    base_med = med(meds)
-                print(
-                    f"    {arm:<16}{len(ss):>4}"
-                    f"{fmt(pct(meds,10)):>8}{fmt(pct(meds,50)):>8}{fmt(pct(meds,90)):>8}"
-                    f"{fmt(med([s['up_median'] for s in ss if s.get('up_median') is not None])):>8}"
-                    f"{fmt(sum(1 for m in meds if m < args.floor_mbps)/len(meds)*100,1):>8}"
-                    f"{fmt(med([s['ping_rtt_ms'] for s in ss if s.get('ping_rtt_ms') is not None]),1):>8}"
-                    f"{fmt(med([s['ping_jitter_ms'] for s in ss if s.get('ping_jitter_ms') is not None]),1):>8}"
-                    f"{fmt(med([s['ping_loss_pct'] for s in ss if s.get('ping_loss_pct') is not None]),2):>7}"
-                    f"{fmt((med([s['discard_rate'] for s in ss if s.get('discard_rate') is not None]) or 0)*100,2) if any(s.get('discard_rate') is not None for s in ss) else '-':>7}"
-                    f"{fmt(med([s['relays'] for s in ss if s.get('relays') is not None]),1) if any(s.get('relays') is not None for s in ss) else '-':>7}"
-                )
-            if base_med:
-                for arm, ss in rows:
-                    if arm == "auto":
-                        continue
-                    m = med([s["down_median"] for s in ss])
-                    if m:
-                        print(f"    {arm} vs auto: {(m/base_med - 1)*100:+.1f}% download median")
+    t = Table([("arm", "<"), ("sessions", ">"), ("fail", ">"),
+               ("slow 10%", ">"), ("median", ">"), ("fast 10%", ">"),
+               ("upload", ">"), (f"below {args.floor_mbps:g}", ">"), ("p90/p10", ">"),
+               (f"Δ slow 10% vs {BASE}", ">")])
+    for a in arms_sorted:
+        s = stats[a]
+        delta = "—"
+        if a != BASE and base_meds and s["p10"] and stats[BASE]["p10"]:
+            dd = (s["p10"] / stats[BASE]["p10"] - 1) * 100
+            delta = ci_str(boot_rel_ci(base_meds, s["meds"], lambda xs: pct(xs, 10)), dd)
+        t.row(a, s["n"], by_arm[a]["failed"],
+              fmt(s["p10"]), fmt(s["p50"]), fmt(s["p90"]), fmt(s["up"]),
+              f"{s['floor']:.0f}%" if s["floor"] is not None else "-",
+              f"{fmt(s['spread'],1)}x" if s["spread"] else "-",
+              delta)
+    for a in sorted(by_arm):
+        if a not in stats:
+            t.row(a, 0, by_arm[a]["failed"], "-", "-", "-", "-", "-", "-", "—")
+    out += t.render()
+    headline_table = t
+    out.append("")
+    out.append("     slow 10% / fast 10%  the 10th and 90th percentile of the per-session")
+    out.append("                          median: a bad session, and a good session")
+    out.append(f"     below {args.floor_mbps:<15g}share of sessions whose median never reached it —")
+    out.append("                          the number this issue wants driven down")
+    out.append("     p90/p10              how far apart good and bad sessions are; 1.0x")
+    out.append("                          would mean every session performs alike")
 
-    # ---- a table to paste into the issue ----
-    if args.markdown:
-        with open(args.markdown, "w") as fh:
-            fh.write("| exit | arm | n | dn p10 | dn p50 | dn p90 | up p50 | floor% | rtt ms | jit ms | loss% | disc% | relays |\n")
-            fh.write("|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n")
-            for ex in exits:
-                for arm, g in sorted(by_arm.items()):
-                    ss = [s for s in g["sessions"] if s.get("dest") == ex]
-                    if not ss:
-                        continue
-                    meds = [s["down_median"] for s in ss]
-                    fh.write("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n".format(
-                        ex, arm, len(ss),
-                        fmt(pct(meds,10)), fmt(pct(meds,50)), fmt(pct(meds,90)),
-                        fmt(med([s['up_median'] for s in ss if s.get('up_median') is not None])),
-                        fmt(sum(1 for m in meds if m < args.floor_mbps)/len(meds)*100,1),
-                        fmt(med([s['ping_rtt_ms'] for s in ss if s.get('ping_rtt_ms') is not None]),1),
-                        fmt(med([s['ping_jitter_ms'] for s in ss if s.get('ping_jitter_ms') is not None]),1),
-                        fmt(med([s['ping_loss_pct'] for s in ss if s.get('ping_loss_pct') is not None]),2),
-                        fmt((med([s['discard_rate'] for s in ss if s.get('discard_rate') is not None]) or 0)*100,2)
-                            if any(s.get('discard_rate') is not None for s in ss) else "-",
-                        fmt(med([s['relays'] for s in ss if s.get('relays') is not None]),1)
-                            if any(s.get('relays') is not None for s in ss) else "-"))
-        print()
-        print(f"Markdown table for the issue written to {args.markdown}")
+    # ---------------------------------------------------- 2. per exit node --
 
-    n_min = min((len(g["sessions"]) for g in by_arm.values()), default=0)
+    real_exits = [e for e in exits if e != "-"]
+    if real_exits:
+        out += section(2, "BY EXIT NODE",
+                       "Same comparison, split by exit. Each row is one arm against "
+                       "one exit.", W)
+        te = Table([("exit", "<"), ("arm", "<"), ("n", ">"),
+                    ("slow 10%", ">"), ("median", ">"), ("fast 10%", ">"), ("upload", ">"),
+                    (f"below {args.floor_mbps:g}", ">"), ("rtt ms", ">"), ("jitter ms", ">"),
+                    ("loss %", ">"), ("discard %", ">"), ("routes", ">"),
+                    (f"Δ median vs {BASE}", ">")])
+        first = True
+        for ex in real_exits:
+            if not first:
+                te.divider()
+            first = False
+            ex_rows = [(a, [s for s in by_arm[a]["sessions"] if s.get("dest") == ex])
+                       for a in arms_sorted]
+            ex_rows = [(a, ss) for a, ss in ex_rows if ss]
+            ebase = None
+            for a, ss in ex_rows:
+                if a == BASE:
+                    ebase = arm_stats(ss, args.floor_mbps)
+            champ_delta = None
+            for a, ss in ex_rows:
+                s = arm_stats(ss, args.floor_mbps)
+                d = "—"
+                if a != BASE and ebase and ebase["p50"] and s["p50"]:
+                    dv = (s["p50"] / ebase["p50"] - 1) * 100
+                    d = f"{dv:+.0f}%"
+                    if a == champion:
+                        champ_delta = dv
+                te.row(ex if a == ex_rows[0][0] else "", a, s["n"],
+                       fmt(s["p10"]), fmt(s["p50"]), fmt(s["p90"]), fmt(s["up"]),
+                       f"{s['floor']:.0f}%" if s["floor"] is not None else "-",
+                       fmt(s["rtt"], 0), fmt(s["jit"], 1), fmt(s["loss"], 2),
+                       fmt(s["disc"] * 100, 2) if s["disc"] is not None else "-",
+                       fmt(s["relays"], 1), d)
+            if ebase:
+                per_exit_delta.append((ex, ebase["rtt"], champ_delta))
+        out += te.render()
+        exit_table = te
+
+        pts = [(r, d) for _, r, d in per_exit_delta if r is not None and d is not None]
+        trend = None
+        if len(pts) >= 2:
+            pts.sort()
+            (rlo, dlo), (rhi, dhi) = pts[0], pts[-1]
+            if dhi - dlo > 5:
+                trend = (f"The pinning benefit GROWS with path RTT "
+                         f"({rlo:.0f} ms → {dlo:+.0f}%, {rhi:.0f} ms → {dhi:+.0f}%). "
+                         f"That is what a reassembly-window limit predicts: the further "
+                         f"the exit, the more reordering a striped transfer accumulates "
+                         f"inside a window sized for a LAN.")
+            elif dlo - dhi > 5:
+                trend = (f"The pinning benefit SHRINKS with path RTT "
+                         f"({rlo:.0f} ms → {dlo:+.0f}%, {rhi:.0f} ms → {dhi:+.0f}%), "
+                         f"which is the opposite of the reassembly-window prediction — "
+                         f"look at relay load instead.")
+            else:
+                trend = ("The benefit does not track path RTT, so whatever causes the "
+                         "floors is not obviously distance-dependent.")
+        if trend:
+            out.append("")
+            for line in textwrap.wrap(trend, W - 5):
+                out.append("     " + line)
+
+    # ------------------------------------------------------ 3. diagnostics --
+
+    if not args.no_diagnostics:
+        out += section(3, "SUPPORTING EVIDENCE",
+                       "Why the arms differ. None of this is the headline; it is what "
+                       "lets you argue for a fix rather than just report a gap.", W)
+
+        # 3a path quality
+        out.append("  3a  Path quality — measured with NO congestion controller in the loop,")
+        out.append("      so it separates 'the path loses packets' from 'TCP overreacts'.")
+        out.append("")
+        tq = Table([("arm", "<"), ("frame discard %", ">"), ("TCP retx", ">"),
+                    ("ping loss %", ">"), ("ping jitter ms", ">"), ("ping rtt ms", ">"),
+                    ("UDP loss %", ">"), ("UDP jitter ms", ">"), ("distinct routes", ">")])
+        for a in arms_sorted:
+            ss = by_arm[a]["sessions"]
+
+            def c(key, scale=1.0, nd=2):
+                vals = [s[key] for s in ss if s.get(key) is not None]
+                return fmt(med(vals) * scale, nd) if vals else "-"
+            tq.row(a, c("discard_rate", 100, 2), c("retx", 1, 0),
+                   c("ping_loss_pct", 1, 2), c("ping_jitter_ms", 1, 1),
+                   c("ping_rtt_ms", 1, 1), c("udp_loss_pct", 1, 2),
+                   c("udp_jitter_ms", 1, 1), c("relays", 1, 1))
+        out += tq.render()
+        quality_table = tq
+        out.append("")
+        out.append("      frame discard %   frames that arrived but missed the reassembly")
+        out.append("                        window. High here + low ping loss = the path is")
+        out.append("                        fine and the window is the bottleneck.")
+        out.append("      ping loss/jitter  from a ping running THROUGH the tunnel during the")
+        out.append("                        transfer. Needs no far end, and measures under load.")
+        out.append("      distinct routes   how many routes the planner drew from. The pinned")
+        out.append("                        arm must read 1.0 — if it does not, the pin never")
+        out.append("                        took and every number above is about nothing.")
+
+        # pin sanity check, stated loudly
+        if champion and stats[champion]["relays"] and stats[champion]["relays"] > 1.5:
+            out.append("")
+            out.append(f"      *** '{champion}' drew from {stats[champion]['relays']:.1f} routes, "
+                       f"not 1. The pin did not take.")
+            out.append("          Treat this whole report as void until use-arm.sh --count reads 1.")
+
+        # 3b variance
+        if any(s["within_cv"] is not None for g in by_arm.values() for s in g["sessions"]):
+            out.append("")
+            out.append("  3b  Where the variance lives — is a session dealt its fate, or does it")
+            out.append("      flicker while you hold it open? Different causes, different fixes.")
+            out.append("")
+            tv = Table([("arm", "<"), ("between sessions", ">"), ("within a session", ">"),
+                        ("reading", "<")])
+            for a in arms_sorted:
+                ss = by_arm[a]["sessions"]
+                if len(ss) < 2:
+                    continue
+                between = cv([s["down_median"] for s in ss])
+                within = med([s["within_cv"] for s in ss if s["within_cv"] is not None])
+                verdict = "-"
+                if between is not None and within is not None:
+                    if within > 1.5 * between:
+                        verdict = "flickers inside a session"
+                    elif between > 1.5 * within:
+                        verdict = "the session is dealt its fate"
+                    else:
+                        verdict = "both, comparably"
+                tv.row(a, fmt(between, 3), fmt(within, 3), verdict)
+            out += tv.render()
+            out.append("")
+            out.append("      Coefficient of variation; lower is steadier.")
+            out.append("      dealt its fate  → what a session GETS (channels, exit, SURB warm-up)")
+            out.append("                        decides it. Look at which relays it had channels to.")
+            out.append("      flickers        → the per-packet draw or transient relay load. Look")
+            out.append("                        at frame discards and the route count.")
+
+        # 3c rep trend
+        max_reps = max((len(s["rep_medians"]) for g in by_arm.values()
+                        for s in g["sessions"]), default=0)
+        if max_reps > 1:
+            out.append("")
+            out.append("  3c  Does a held-open session decay? Median Mbit/s of each transfer,")
+            out.append(f"      {manifest.get('rep_gap_s','?')}s apart, within one connection.")
+            out.append("")
+            tr = Table([("arm", "<")] + [(f"rep {i+1}", ">") for i in range(max_reps)])
+            for a in arms_sorted:
+                ss = by_arm[a]["sessions"]
+                cells = []
+                for i in range(max_reps):
+                    vals = [s["rep_medians"][i] for s in ss if len(s["rep_medians"]) > i]
+                    cells.append(fmt(med(vals)))
+                tr.row(a, *cells)
+            out += tr.render()
+            out.append("")
+            out.append("      flat    a session's throughput is a property of the session")
+            out.append("      falling it degrades while held open (SURB or channel drift)")
+            out.append("      noisy   each transfer re-draws its luck — the striping prediction")
+
+        # 3d paired
+        if BASE in by_arm:
+            base_by_cycle = {}
+            for s in by_arm[BASE]["sessions"]:
+                base_by_cycle[(s["cycle"], s.get("dest"))] = s["down_median"]
+            pair_rows = []
+            for a in arms_sorted:
+                if a == BASE:
+                    continue
+                d = [s["down_median"] - base_by_cycle[(s["cycle"], s.get("dest"))]
+                     for s in by_arm[a]["sessions"]
+                     if (s["cycle"], s.get("dest")) in base_by_cycle]
+                if d:
+                    pair_rows.append((a, len(d), st.median(d),
+                                      sum(1 for x in d if x > 0) / len(d) * 100))
+            if pair_rows:
+                out.append("")
+                out.append(f"  3d  Head to head against '{BASE}' within the same cycle, so network-wide")
+                out.append("      load variation cancels out.")
+                out.append("")
+                tp = Table([("arm", "<"), ("paired cycles", ">"),
+                            ("median Δ Mbit/s", ">"), (f"beat {BASE}", ">")])
+                for a, n, dm, winpct in pair_rows:
+                    tp.row(a, n, f"{dm:+.2f}", f"{winpct:.0f}% of cycles")
+                out += tp.render()
+                out.append("")
+                out.append("      An arm that gives up a little median while cutting the 'below'")
+                out.append("      column is the outcome this issue asks for — say so explicitly")
+                out.append("      rather than letting a lower median read as a regression.")
+
+    # ------------------------------------------------------------ caveats --
+
+    n_min = min((s["n"] for s in stats.values()), default=0)
+    caveats = []
+    if floor_note:
+        caveats.append(floor_note)
+    if pin_broken:
+        caveats.append(f"'{champion}' drew from {stats[champion]['relays']:.1f} distinct "
+                       f"routes, not 1. The manual hopr-lib config is not being read — "
+                       f"check the systemd drop-in and re-run "
+                       f"`use-arm.sh {champion} --count` until it reads 1.")
     if n_min < 30:
-        print()
-        print(f"CAUTION: smallest arm has {n_min} usable sessions. Tail statistics are not")
-        print("trustworthy below ~30 -- treat this as a signal check, not a result.")
-    print()
+        caveats.append(f"Smallest arm has {n_min} usable sessions. Tail statistics are not "
+                       f"trustworthy below ~30 — signal check, not a result.")
+    tot_fail = sum(g["failed"] for g in by_arm.values())
+    if tot_fail > len(rows) * 0.1:
+        caveats.append(f"{tot_fail} sessions failed or produced no data "
+                       f"({tot_fail / (len(rows) + tot_fail) * 100:.0f}% of attempts). "
+                       f"Failures are not random — check whether one arm failed more.")
+    if champion and stats[champion]["relays"] is None:
+        caveats.append("No route counts: planner DEBUG logging was off, so nothing here "
+                       "confirms the pin actually took.")
+    if caveats:
+        out.append("")
+        out.append("  ⚠ CAVEATS")
+        for cvt in caveats:
+            for i, line in enumerate(textwrap.wrap(cvt, W - 6, break_on_hyphens=False)):
+                out.append("    " + ("• " if i == 0 else "  ") + line)
+    out.append("")
+
+    print("\n".join(l.rstrip() for l in out))
+
+    # ---------------------------------------------- markdown for the issue --
+
+    if args.markdown:
+        m = []
+        m.append("## Bandwidth: pinned path vs. automatic path finding")
+        m.append("")
+        m.append(f"**{headline}**")
+        m.append("")
+        # Limits go above the numbers, not in a footer: a reader who stops after
+        # the first table must have already seen what the numbers cannot support.
+        if caveats:
+            m.append("> [!WARNING]")
+            for i, cvt in enumerate(caveats):
+                if i:
+                    m.append(">")
+                m.append(f"> {cvt}")
+            m.append("")
+        if champion:
+            m.append(f"| | `{BASE}` | `{champion}` | change |")
+            m.append("|---|--:|--:|--:|")
+            m.append(f"| slowest 10% of sessions | {fmt(stats[BASE]['p10'])} | "
+                     f"{fmt(stats[champion]['p10'])} | {ci_str(ci10, d10)} |")
+            if floor_base is not None:
+                m.append(f"| sessions below {args.floor_mbps:g} Mbit/s | {floor_base:.0f}% | "
+                         f"{floor_champ:.0f}% | {floor_champ - floor_base:+.0f} points |")
+            m.append(f"| typical session (median) | {fmt(stats[BASE]['p50'])} | "
+                     f"{fmt(stats[champion]['p50'])} | {ci_str(ci50, d50)} |")
+            m.append(f"| spread p90/p10 | {fmt(stats[BASE]['spread'],1)}x | "
+                     f"{fmt(stats[champion]['spread'],1)}x | |")
+            m.append("")
+            m.append("Parenthesised ranges are 90% bootstrap confidence intervals; one that "
+                     "spans 0 means the arms are indistinguishable at this sample size.")
+            m.append("")
+        m.append(f"Run: {' · '.join(bits)}. "
+                 f"{load} per transfer × {manifest.get('reps','?')} rep(s), "
+                 f"{manifest.get('rep_gap_s','?')}s apart. Started {start or '?'}.")
+        m.append("")
+        m.append("### Throughput by arm (Mbit/s)")
+        m.append("")
+        m += headline_table.markdown()
+        m.append("")
+        if real_exits:
+            m.append("### By exit node")
+            m.append("")
+            m += exit_table.markdown()
+            m.append("")
+            if trend:
+                m.append(trend)
+                m.append("")
+        if not args.no_diagnostics:
+            m.append("### Why they differ")
+            m.append("")
+            m.append("None of these involve a congestion controller, so they separate "
+                     "\"the path loses packets\" from \"TCP overreacts to loss\".")
+            m.append("")
+            m += quality_table.markdown()
+            m.append("")
+        m.append("<details><summary>How to read the columns</summary>")
+        m.append("")
+        m.append("- **slow 10% / fast 10%** — 10th/90th percentile of the per-session median: "
+                 "a bad session and a good session.")
+        m.append(f"- **below {args.floor_mbps:g}** — share of sessions whose median never reached "
+                 f"{args.floor_mbps:g} Mbit/s. This is the number the issue asks to drive down.")
+        m.append("- **p90/p10** — how far apart good and bad sessions are. 1.0x would mean "
+                 "every session performs alike.")
+        m.append("- **frame discard %** — frames that arrived but missed the session "
+                 "reassembly window. High here with low ping loss means the path is fine and "
+                 "the window is the bottleneck.")
+        m.append("- **ping loss / jitter** — from a ping running *through* the tunnel during "
+                 "the transfer, so it is measured under load and needs no second machine.")
+        m.append("- **distinct routes** — how many routes the planner drew from. The pinned "
+                 "arm must read 1.0, otherwise the pin never took.")
+        m.append("")
+        m.append("</details>")
+        m.append("")
+        Path(args.markdown).write_text("\n".join(m))
+        print(f"  Issue-ready report written to {args.markdown}\n")
 
 
 if __name__ == "__main__":

@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 #
-# 02-make-arms.sh -- generate the experiment's arm definitions.
+# 02-make-arms.sh -- render the tracked arm templates into runnable arms.
 #
-#   sudo ./02-make-arms.sh --out ./arms
-#   sudo ./02-make-arms.sh --out ./arms --pin-relay 0xRELAY_A --pin-relay 0xRELAY_B
+#   sudo ./setup/02-make-arms.sh --destination UK
+#   sudo ./setup/02-make-arms.sh --destination UK --pin-relay 0xRELAY_A
+#   ./setup/02-make-arms.sh --list
 #
-# An "arm" is one routing configuration under test. Each arm is a directory:
+# TEMPLATES vs INSTANCES -- why this script exists at all
 #
-#   arms/<name>/config.toml   -> /etc/gnosisvpn/config.toml
-#   arms/<name>/hopr.yaml     -> /etc/gnosisvpn/hopr-arm.yaml   (optional)
-#   arms/<name>/env           -> extra systemd Environment= lines (optional)
-#   arms/<name>/needs_fresh_identity  (optional marker)
-#   arms/<name>/README        what this arm tests
+#   arms/<name>/ in the REPO is a template: prose, a hop count, a planner body,
+#   optional flags. It contains no addresses, so it is safe to track, review and
+#   diff. A changed planner setting shows up in a commit, which matters because a
+#   silent one invalidates every comparison made after it.
+#
+#   $GVPN_ARMS_DIR/<name>/ in the STATE directory is an instance: the template
+#   with this node's safe and module addresses substituted, and a config.toml
+#   derived from the live production config. Those carry identity, so they are
+#   never tracked and never inside the git worktree.
+#
+#   Templates are static. Instances are per-node and per-run. Conflating the two
+#   is how an address ends up in a public repo.
 #
 # THE KEY LEVER, and it needs no recompile:
 #
 #   The service honours GNOSISVPN_HOPR_CONFIG_PATH. Setting it switches the
 #   worker from a generated hopr-lib config to a file you supply, which exposes
-#   the whole HoprLibConfig -- including protocol.path_planner. That is where
-#   the path draw lives:
+#   the whole HoprLibConfig -- including protocol.path_planner:
 #
 #     max_cached_paths          candidates the selector may return per query
 #     return_path_exploration   fraction of return draws made uniformly at random
@@ -26,9 +33,9 @@
 #     min_paths_anonymity_floor candidate count below which no pruning happens
 #     latency_halflife          how hard latency is weighted
 #
-#   max_cached_paths = 1 collapses the weighted collection to a single entry, so
-#   forward AND return resolve to one path, per packet, deterministically. That is
-#   a genuine pin of both legs -- without patching hopr-lib and without the
+#   max_cached_paths = 1 collapses the weighted candidate collection to a single
+#   entry, so forward AND return resolve to one path, per packet, deterministically.
+#   A genuine pin of both legs -- without patching hopr-lib, and without the
 #   channel churn that allowlist-based pinning costs.
 #
 #   Two caveats this script handles:
@@ -39,55 +46,71 @@
 #
 set -euo pipefail
 
-OUT="./arms"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
+
+TEMPLATES="$GVPN_ARM_TEMPLATES"
+OUT="$GVPN_ARMS_DIR"
 PROD_CONFIG="${GVPN_PROD_CONFIG:-/etc/gnosisvpn/config.toml}"
 SAFE_FILE="${GVPN_SAFE_FILE:-/var/lib/gnosisvpn/.config/gnosisvpn-hopr.safe}"
 HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
-DESTINATION_ONLY=""
+DESTINATION_ONLY="${GVPN_DESTINATION:-}"
 PIN_RELAYS=()
 MIN_ACK_RATE="${GVPN_MIN_ACK_RATE:-0.1}"
+DO_LIST=0
 
 usage() {
   cat <<EOF
-02-make-arms.sh -- generate arm definitions for the #8408 benchmark
+02-make-arms.sh -- render arm templates into runnable arms
 
-Usage: sudo $0 [--out DIR] [--pin-relay 0x... ]...
+Usage: sudo $0 [--destination ID] [--pin-relay 0x...]... [--out DIR]
+       $0 --list
 
-  --out DIR             where to write the arms (default: $OUT)
-  --pin-relay ADDR      add a channel-allowlist arm pinned to this relay.
-                        Repeatable. These arms need a fresh identity each
-                        (the allowlist only applies while channels are opened),
-                        so budget one faucet code per relay.
   --destination ID      keep only this destination in the arm configs
-                        (recommended: one exit, so the exit is not a variable)
+                        (default from gvpn.conf: ${GVPN_DESTINATION:-<all>})
+  --pin-relay ADDR      instantiate the _pin-cfg template against this relay.
+                        Repeatable. Each needs a fresh identity, so budget one
+                        faucet code per relay.
+  --out DIR             where to write instances (default: $OUT)
+  --templates DIR       where to read templates from (default: $TEMPLATES)
   --prod-config PATH    source config to derive from (default: $PROD_CONFIG)
-  --safe-file PATH      node safe file to read addresses from (default: $SAFE_FILE)
+  --safe-file PATH      node safe file to read addresses from
+  --list                show the available templates and exit
   -h, --help
 
-Arms produced:
-  auto           stock config, 1 hop, automatic path finding        [control]
-  pin-planner    max_cached_paths=1, exploration=0  -> one path, both legs
-  no-explore     exploration=0 only                 -> isolates the 10% blind draws
-  narrow         max_cached_paths=3, temper=1.0     -> less spread, some diversity
-  zero-hop       hops=0                             -> no relay at all [upper bound]
-  pin-cfg-<n>    channel allowlist per --pin-relay  -> forward leg only
-
-Run AFTER the node has onboarded once and reached Ready, so the safe file exists.
+Templates live in the repo and are tracked; instances live in the state
+directory ($GVPN_STATE) and are not. Run this AFTER the node has onboarded
+once and reached Ready, so the safe file exists.
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)          OUT="$2"; shift 2 ;;
+    --templates)    TEMPLATES="$2"; shift 2 ;;
     --pin-relay)    PIN_RELAYS+=("$2"); shift 2 ;;
     --destination)  DESTINATION_ONLY="$2"; shift 2 ;;
     --prod-config)  PROD_CONFIG="$2"; shift 2 ;;
     --safe-file)    SAFE_FILE="$2"; shift 2 ;;
+    --list)         DO_LIST=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
+if [ "$DO_LIST" = 1 ]; then
+  printf '%-16s %-7s %-10s %-10s %s\n' TEMPLATE HOPS PLANNER FRESH-ID SUMMARY
+  for d in "$TEMPLATES"/*/; do
+    n=$(basename "$d")
+    printf '%-16s %-7s %-10s %-10s %s\n' \
+      "$n" "$(cat "$d/hops" 2>/dev/null || echo '?')" \
+      "$([ -f "$d/planner.yaml" ] && echo yes || echo -)" \
+      "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
+      "$(head -1 "$d/README" 2>/dev/null)"
+  done
+  exit 0
+fi
+
+[ -d "$TEMPLATES" ] || { echo "no templates at $TEMPLATES" >&2; exit 1; }
 [ -r "$PROD_CONFIG" ] || { echo "cannot read $PROD_CONFIG" >&2; exit 1; }
 
 SAFE_ADDR=""; MODULE_ADDR=""
@@ -99,8 +122,8 @@ if [ -z "$SAFE_ADDR" ] || [ -z "$MODULE_ADDR" ]; then
   cat >&2 <<EOF
 WARNING: could not read safe/module addresses from $SAFE_FILE
 
-The planner arms (pin-planner, no-explore, narrow) need them, because a manual
-hopr-lib config does not get them injected. Onboard the node first:
+The planner arms need them, because a manual hopr-lib config does not get them
+injected. Onboard the node first:
 
     gnosis_vpn-ctl start-client 30m
     gnosis_vpn-ctl status          # wait for "Ready"
@@ -111,6 +134,7 @@ EOF
   SAFE_ADDR="0xFILL_ME_IN"; MODULE_ADDR="0xFILL_ME_IN"
 fi
 
+gvpn_state_init
 mkdir -p "$OUT"
 
 # ------------------------------------------------------------------ helpers --
@@ -155,20 +179,22 @@ for name in keep:
     body.append(f"path    = {{ hops = {hops} }}")
     body.append("")
 
-# head keeps version=, [connection...] and [strategy...] from the source config
 open(out, "w").write("\n".join([l.rstrip() for l in head if l.strip()] + [""] + body) + "\n")
 PY
 }
 
-# A minimal hopr-lib config. Every field of HoprLibConfig has a serde default, so
-# only the deviations need stating -- but the struct is deny_unknown_fields, so a
-# typo fails loudly at service start rather than being silently ignored. Good.
-make_hopr_yaml() {  # make_hopr_yaml OUTFILE PLANNER_BODY
-  local out="$1"; shift
-  cat > "$out" <<EOF
+# Wrap a template's planner body in a complete hopr-lib config. Every field of
+# HoprLibConfig has a serde default, so only deviations need stating -- but the
+# struct is deny_unknown_fields, so a typo fails loudly at service start rather
+# than being silently ignored. Good.
+make_hopr_yaml() {  # make_hopr_yaml OUTFILE PLANNER_TEMPLATE
+  local out="$1" tmpl="$2"
+  {
+    cat <<EOF
 # Manual hopr-lib config for one benchmark arm.
-# Selected by GNOSISVPN_HOPR_CONFIG_PATH; switches the worker out of generated
-# mode, which is why safe_module has to be stated explicitly here.
+# GENERATED by 02-make-arms.sh from $(basename "$(dirname "$tmpl")")/planner.yaml
+# -- edit the template in the repo, not this file. Contains node addresses;
+# never commit it.
 safe_module:
   safe_address: "$SAFE_ADDR"
   module_address: "$MODULE_ADDR"
@@ -181,124 +207,74 @@ protocol:
     interval: 3s
     recheck_threshold: 3s
   path_planner:
-$1
 EOF
+    sed "s/@MIN_ACK_RATE@/$MIN_ACK_RATE/g; s/^/    /" "$tmpl"
+  } > "$out"
 }
 
-arm() {  # arm NAME README_TEXT
-  mkdir -p "$OUT/$1"
-  printf '%s\n' "$2" > "$OUT/$1/README"
-}
+# Render one template directory into one instance directory.
+render() {  # render TEMPLATE_DIR INSTANCE_NAME [RELAY]
+  local t="$1" name="$2" relay="${3:-}"
+  local d="$OUT/$name" was_onboarded=0
 
-use_hopr_yaml() {  # use_hopr_yaml ARM
-  cat > "$OUT/$1/env" <<EOF
-GNOSISVPN_HOPR_CONFIG_PATH=$HOPR_YAML_DEST
-EOF
+  # PRESERVE THE ONBOARDING MARKER ACROSS A RE-RENDER.
+  #
+  # gvpn-bench.sh re-onboards -- which destroys the funded identity and spends a
+  # faucet code -- when an arm has needs_fresh_identity and no .onboarded marker.
+  # Re-rendering an arm to change a planner setting must not look like an arm
+  # that has never been funded, or `make arms` silently costs you an identity and
+  # a code on the next run.
+  [ -f "$d/.onboarded" ] && was_onboarded=1
+
+  rm -rf "$d"; mkdir -p "$d"
+  [ "$was_onboarded" = 1 ] && touch "$d/.onboarded"
+
+  sed "s/@RELAY@/$relay/g" "$t/README" > "$d/README"
+
+  make_config "$d/config.toml" "$(cat "$t/hops")"
+  [ -f "$t/config.append" ] && sed "s/@RELAY@/$relay/g" "$t/config.append" >> "$d/config.toml"
+
+  if [ -f "$t/planner.yaml" ]; then
+    make_hopr_yaml "$d/hopr.yaml" "$t/planner.yaml"
+    printf 'GNOSISVPN_HOPR_CONFIG_PATH=%s\n' "$HOPR_YAML_DEST" > "$d/env"
+  fi
+
+  [ -f "$t/flags" ]                && cp "$t/flags" "$d/flags"
+  [ -f "$t/needs_fresh_identity" ] && touch "$d/needs_fresh_identity"
+  printf '%s\n' "$(basename "$t")" > "$d/.template"
+  return 0
 }
 
 # -------------------------------------------------------------------- arms --
 
-echo "writing arms to $OUT"
+echo "templates: $TEMPLATES"
+echo "instances: $OUT"
+[ -n "$DESTINATION_ONLY" ] && echo "destination: $DESTINATION_ONLY (only)"
+echo
 
-# --- control -----------------------------------------------------------------
-arm auto "\
-CONTROL. Stock production configuration, 1 intermediate hop, automatic path
-finding with the shipped edge-client planner settings:
-  max_cached_paths 50, min_paths_anonymity_floor 0 (pruning off),
-  return_path_weight_temper 0.5, return_path_exploration 0.1.
-Every other arm is read as a difference from this one."
-make_config "$OUT/auto/config.toml" 1
+for t in "$TEMPLATES"/*/; do
+  name=$(basename "$t")
+  case "$name" in
+    _*) continue ;;   # templates instantiated per-argument, handled below
+  esac
+  render "$t" "$name"
+  echo "  rendered $name"
+done
 
-# --- the pin -----------------------------------------------------------------
-arm pin-planner "\
-PINNED, BOTH LEGS, NO RECOMPILE. max_cached_paths = 1 collapses the weighted
-candidate collection to a single validated path, so every packet's forward route
-and every SURB's return route resolve to the same path. exploration = 0 removes
-the uniform-random draws on top.
-This is the arm that tests whether multipath striping is the floor mechanism:
-if the throughput DISTRIBUTION tightens here -- even at the same or slightly
-lower median -- striping is implicated."
-make_config "$OUT/pin-planner/config.toml" 1
-make_hopr_yaml "$OUT/pin-planner/hopr.yaml" "\
-    max_cached_paths: 1
-    min_paths_anonymity_floor: 0
-    return_path_exploration: 0.0
-    return_path_weight_temper: 1.0
-    min_ack_rate: $MIN_ACK_RATE"
-use_hopr_yaml pin-planner
-
-# --- one variable at a time --------------------------------------------------
-arm no-explore "\
-ONE VARIABLE. Identical to auto except return_path_exploration = 0. Keeps full
-relay diversity but stops the 10% of return draws that ignore quality entirely.
-If auto and pin-planner differ but auto and no-explore do not, the exploration
-term is not the problem and the spread across GOOD relays is."
-make_config "$OUT/no-explore/config.toml" 1
-make_hopr_yaml "$OUT/no-explore/hopr.yaml" "\
-    max_cached_paths: 50
-    min_paths_anonymity_floor: 0
-    return_path_exploration: 0.0
-    return_path_weight_temper: 0.5
-    min_ack_rate: $MIN_ACK_RATE"
-use_hopr_yaml no-explore
-
-arm narrow "\
-MIDDLE GROUND. Three candidates instead of fifty, weights untempered so the best
-one dominates, no blind exploration. If this recovers most of pin-planner's
-benefit, there is a shippable setting that keeps some relay diversity -- which
-matters, because diversity is a privacy and resilience property, not just cost."
-make_config "$OUT/narrow/config.toml" 1
-make_hopr_yaml "$OUT/narrow/hopr.yaml" "\
-    max_cached_paths: 3
-    min_paths_anonymity_floor: 0
-    return_path_exploration: 0.0
-    return_path_weight_temper: 1.0
-    min_ack_rate: $MIN_ACK_RATE"
-use_hopr_yaml narrow
-
-# --- upper bound -------------------------------------------------------------
-arm zero-hop "\
-UPPER BOUND, NOT A PRODUCT CONFIGURATION. No relay in the path at all, so
-whatever throughput and variance remains belongs to the entry, the exit,
-WireGuard and the session layer. Requires the service to run with
---allow-insecure (00-vm-setup.sh --allow-insecure), and exposes this client's
-IP to the exit. Throwaway identity only."
-make_config "$OUT/zero-hop/config.toml" 0
-echo "--allow-insecure" > "$OUT/zero-hop/flags"
-
-# --- allowlist arms ----------------------------------------------------------
 for relay in "${PIN_RELAYS[@]:-}"; do
   [ -n "$relay" ] || continue
-  short="${relay:0:10}"
-  name="pin-cfg-$short"
-  arm "$name" "\
-FORWARD LEG ONLY, VIA CHANNEL ALLOWLIST. Opens exactly one outgoing channel, to
-$relay, so the forward path has one candidate. The RETURN leg is untouched and
-still drawn weighted-random -- which is the point: comparing this against
-pin-planner isolates the return-leg striping on its own.
-Needs a virgin identity, because the allowlist only constrains channels while
-they are being opened. One faucet code per run."
-  make_config "$OUT/$name/config.toml" 1
-  cat >> "$OUT/$name/config.toml" <<EOF
-
-[strategy]
-min_open_channels    = 1
-target_open_channels = 1
-
-[strategy.channel_allowlist]
-enabled = true
-peers   = ["$relay"]
-EOF
-  touch "$OUT/$name/needs_fresh_identity"
+  name="pin-cfg-${relay:0:10}"
+  render "$TEMPLATES/_pin-cfg" "$name" "$relay"
+  echo "  rendered $name  (relay $relay, fresh identity required)"
 done
 
 # ----------------------------------------------------------------- summary --
 
 echo
-printf '%-16s %-10s %-10s %s\n' ARM HOPR.YAML FRESH-ID README
+printf '%-20s %-10s %-10s %s\n' ARM HOPR.YAML FRESH-ID README
 for d in "$OUT"/*/; do
   n=$(basename "$d")
-  printf '%-16s %-10s %-10s %s\n' \
+  printf '%-20s %-10s %-10s %s\n' \
     "$n" \
     "$([ -f "$d/hopr.yaml" ] && echo yes || echo -)" \
     "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
@@ -310,20 +286,10 @@ cat <<EOF
 VALIDATE BEFORE BENCHMARKING. A manual hopr-lib config either loads or the
 service refuses to start -- find that out now, not at 3am in cycle 40:
 
-  sudo cp $OUT/pin-planner/hopr.yaml $HOPR_YAML_DEST
-  sudo cp $OUT/pin-planner/config.toml /etc/gnosisvpn/config.toml
-  sudo mkdir -p /etc/systemd/system/gnosisvpn.service.d
-  printf '[Service]\nEnvironment=GNOSISVPN_HOPR_CONFIG_PATH=%s\n' $HOPR_YAML_DEST \\
-    | sudo tee /etc/systemd/system/gnosisvpn.service.d/30-arm.conf
-  sudo systemctl daemon-reload && sudo systemctl restart gnosisvpn
-  sleep 5 && gnosis_vpn-ctl status
-  sudo journalctl -u gnosisvpn -n 50 --no-pager | grep -i 'config\|error'
+  sudo ./bench/use-arm.sh pin-planner --count
 
-Then confirm the pin actually took, once connected:
-
-  grep -c 'weighted candidate path' /var/log/gnosisvpn/gnosisvpn.log
-  grep -o 'path=[^ ]*' /var/log/gnosisvpn/gnosisvpn.log | sort -u | head
-
-pin-planner should show ONE distinct path per destination; auto should show many.
-If both show many, the manual config did not take effect -- check the drop-in.
+That installs the arm, starts the service, connects, and counts distinct routes.
+pin-planner must read 1; auto must read many. If both read many the manual config
+did not take effect and every later number is about nothing -- check the drop-in
+at /etc/systemd/system/gnosisvpn.service.d/30-arm.conf.
 EOF

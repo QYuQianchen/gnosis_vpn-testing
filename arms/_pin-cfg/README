@@ -1,0 +1,6 @@
+FORWARD LEG ONLY, VIA CHANNEL ALLOWLIST. Opens exactly one outgoing channel, to
+@RELAY@, so the forward path has one candidate. The RETURN leg is untouched and
+still drawn weighted-random -- which is the point: comparing this against
+pin-planner isolates the return-leg striping on its own.
+Needs a virgin identity, because the allowlist only constrains channels while
+they are being opened. One faucet code per run.

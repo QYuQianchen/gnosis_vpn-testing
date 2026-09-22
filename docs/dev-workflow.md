@@ -190,7 +190,7 @@ the very first push fails with `would be overwritten by merge`. The script insta
 | | |
 |---|---|
 | replaced by a deploy | `setup/` `bench/` `docs/` `README.md` `gvpn.conf` |
-| never touched | `arms/` `bench-runs/` `faucet-codes` `BUILD.txt` |
+| never touched | everything in `~/gvpn-state/` — it is outside the worktree |
 
 That split is the safety story: a deploy cannot destroy a run in progress, the arm configs you
 validated, your faucet codes, or the recorded build identity of the machine. Regenerating the arms
@@ -247,7 +247,7 @@ makes `git push origin main` mean something different from what the rest of the 
 `git remote -v` shows what you actually have; the `(push)` lines are the ones that matter.
 
 **Check what you are about to publish.** `.gitignore` already excludes `faucet-codes`,
-`bench-runs/`, `arms/` and `BUILD.txt`, but a private repo is still a place secrets go to live
+everything under `~/gvpn-state/`, but a private repo is still a place secrets go to live
 forever:
 
 ```bash

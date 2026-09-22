@@ -106,13 +106,20 @@
 # Dependencies: bash, coreutils, curl, iperf3, ping, iproute2, gnosis_vpn-ctl.
 #
 set -uo pipefail
-VERSION=0.3.0
+VERSION=0.4.0
+
+# Kit root, used only to stamp the run with the script revision that produced it.
+KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || echo .)"
+# Kit root, state directory, gvpn.conf and any GVPN_STUDY override.
+. "$KIT/lib/common.sh"
 
 # ---------------------------------------------------------------- defaults --
 
 PROFILE="${GVPN_PROFILE:-quick}"
 
-ARMS_DIR="${GVPN_ARMS_DIR:-./arms}"
+# Rendered arm instances, in the state directory -- never the repo's templates,
+# which carry no addresses and are not runnable as-is.
+ARMS_DIR="$GVPN_ARMS_DIR"
 ARMS=""
 CYCLES=""
 DURATION=""
@@ -151,7 +158,10 @@ IPERF_PORT="${GVPN_IPERF_PORT:-5201}"
 PING_TARGET="${GVPN_PING_TARGET:-1.1.1.1}"
 PING_INTERVAL="${GVPN_PING_INTERVAL:-0.25}"
 
-OUT_ROOT="${GVPN_OUT_ROOT:-./bench-runs}"
+# Raw output lives in the state directory, outside the git worktree: a soak is
+# many GB of planner DEBUG logging, and anything inside the worktree is one
+# deploy or one `git clean -fdx` from gone.
+OUT_ROOT="${GVPN_OUT_ROOT:-$GVPN_RUNS_DIR}"
 CONFIG_PATH="${GNOSISVPN_CONFIG_PATH:-/etc/gnosisvpn/config.toml}"
 HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
 DROPIN="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf"
@@ -171,7 +181,10 @@ KEEPALIVE="${GVPN_KEEPALIVE:-60m}"
 DEADMAN_MARGIN="${GVPN_DEADMAN_MARGIN:-120}"
 DEADMAN_HARD=""
 
-CODES_FILE="${GVPN_CODES_FILE:-./faucet-codes}"
+# Faucet codes live in the state directory, not the repo: they are single-use
+# money, and a repo-relative path put them one `git clean` from gone and one
+# careless `git add -A` from published.
+CODES_FILE="${GVPN_CODES_FILE:-$GVPN_SECRETS_DIR/faucet-codes}"
 FAUCET_URL="${GVPN_FAUCET_URL:-https://cfp-funding-api-656686060169.europe-west1.run.app/api/cfp-funding-tool/airdrop}"
 
 ASSUME_MBPS="${GVPN_ASSUME_MBPS:-5}"
@@ -440,6 +453,14 @@ cleanup() {
   echo 0 > "$DEADLINE_FILE" 2>/dev/null
   sleep 8
   kill "$WATCHDOG_PID" 2>/dev/null
+  # The analyser reports the run window; a soak that died at hour 6 of 48 should
+  # say so on the report rather than in someone's memory.
+  printf '{"finished":"%s","exit":%s}\n' "$(stamp)" "$rc" \
+    > "$RUN_DIR/finished.json" 2>/dev/null
+  # Release the deploy hold. Only if it still points at THIS run -- a stale lock
+  # from a crashed run is the user's to clear, and silently stealing it would let
+  # two benches fight over one service.
+  [ "$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" = "$RUN_DIR" ] && rm -f "$GVPN_RUN_LOCK"
   log "run finished (exit $rc); results in $RUN_DIR"
   exit $rc
 }
@@ -803,6 +824,17 @@ describe_schedule() {
 RUN_ID="${GVPN_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 RUN_DIR="$OUT_ROOT/$RUN_ID"
 mkdir -p "$RUN_DIR" || exit 1
+
+# Announce the run. The deploy hook refuses to replace the worktree while this
+# exists: push-to-checkout rewrites script files in place, and bash reads a
+# script incrementally as it runs, so a push mid-soak can corrupt the running
+# bench or silently swap the analysis under a study that is already half done.
+if [ -e "$GVPN_RUN_LOCK" ] && [ "${GVPN_RUN_ID:-}" = "" ]; then
+  echo "a run is already in progress: $(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
+  echo "finish or stop it first, or remove $GVPN_RUN_LOCK if it is stale." >&2
+  exit 1
+fi
+ln -sfn "$RUN_DIR" "$GVPN_RUN_LOCK" 2>/dev/null || true
 RUN_LOG="$RUN_DIR/run.log"
 DEADMAN_LOG="$RUN_DIR/deadman.log"
 WATCHDOG="$RUN_DIR/watchdog.sh"
@@ -840,8 +872,22 @@ log "local cc:    $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || ech
 log "RUST_LOG:    ${RUST_LOG:-<from service drop-in>}"
 log "ctl version: $($CTL -V 2>&1)"
 
+# Provenance. Six weeks from now the only defensible answer to "what binary
+# produced these numbers?" is the one the run recorded for itself, so capture it
+# here rather than trusting that nothing was upgraded in between.
+CLIENT_INFO="$($CTL info 2>/dev/null || true)"
+CLIENT_SVC="$(printf '%s' "$CLIENT_INFO" | sed -n 's/.*client service version:[[:space:]]*\([^,]*\).*/\1/p' | head -1)"
+CLIENT_PKG="$(printf '%s' "$CLIENT_INFO" | sed -n 's/.*package version:[[:space:]]*\([^,[:space:]]*\).*/\1/p' | head -1)"
+[ -n "$CLIENT_PKG" ] || CLIENT_PKG="$(dpkg-query -W -f='${Version}' gnosisvpn 2>/dev/null || true)"
+KIT_REV="$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || true)"
+git -C "$KIT" diff --quiet HEAD 2>/dev/null || KIT_REV="${KIT_REV:+$KIT_REV}-dirty"
+
 cat > "$RUN_DIR/manifest.json" <<EOF
 {"version":"$VERSION","profile":"$PROFILE","mode":"$MODE",
+ "client_service":"$CLIENT_SVC","client_package":"$CLIENT_PKG",
+ "channel":"${GVPN_CHANNEL:-}","network":"${GVPN_NETWORK:-}","kit_rev":"$KIT_REV",
+ "host_cc":"$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')",
+ "study":"${GVPN_STUDY_NAME:-}","floor_mbps":"${GVPN_FLOOR_MBPS:-}",
  "dl_bytes":"${DL_BYTES:-}","ul_bytes":"${UL_BYTES:-}",
  "dl_seconds":"${DL_SECONDS:-}","ul_seconds":"${UL_SECONDS:-}",
  "reps":$REPS,"rep_gap_s":$REP_GAP_S,"udp_seconds":${UDP_SECONDS:-0},"udp_rate":"$UDP_RATE",

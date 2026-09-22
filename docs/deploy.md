@@ -79,8 +79,8 @@ arm configs during the run, which is worth having when you write up the results.
 **Getting results back:**
 
 ```bash
-sudo chown -R deploy: ~/gvpn-8408/bench-runs   # on the VM: the runner writes as root
-rsync -avz gvpn-vm:gvpn-8408/bench-runs/ ./bench-runs/
+sudo chown -R deploy: ~/gvpn-state/runs   # on the VM: the runner writes as root
+rsync -avz gvpn-vm:gvpn-state/runs/ ~/gvpn-state/runs/
 ```
 
 Expect this to be large if planner DEBUG logging is on — the per-session `gnosisvpn.log` slices are
@@ -89,7 +89,7 @@ the bulk of it. To pull only what the analyser needs:
 ```bash
 rsync -avz --include='*/' --include='summary.csv' --include='manifest.json' \
       --include='iperf-*.json' --include='telemetry.prom' --exclude='*' \
-      gvpn-vm:gvpn-8408/bench-runs/ ./bench-runs/
+      gvpn-vm:gvpn-state/runs/ ~/gvpn-state/runs/
 ```
 
 …but note that drops `gnosisvpn.log`, and with it the distinct-relay count. Pull the logs for at
@@ -106,17 +106,17 @@ watching:
 ```bash
 ssh gvpn-vm
 tmux new -s bench
-sudo ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --arms-dir ./arms --detach
-# prints e.g. ./bench-runs/20260911-140302
-tail -f ./bench-runs/20260911-140302/run.log
+sudo -E ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --detach
+# prints e.g. ~/gvpn-state/runs/20260911-140302
+tail -f ~/gvpn-state/runs/20260911-140302/run.log
 # detach with Ctrl-b d; reattach later with: tmux attach -t bench
 ```
 
 Two files to check on when you come back:
 
 ```bash
-tail -20 bench-runs/<id>/run.log        # progress
-cat      bench-runs/<id>/deadman.log    # empty is good — anything here means a stall fired
+tail -20 ~/gvpn-state/runs/<id>/run.log        # progress
+cat      ~/gvpn-state/runs/<id>/deadman.log    # empty is good — anything here means a stall fired
 ```
 
 ---
@@ -292,12 +292,13 @@ gnosis_vpn-ctl disconnect
 # VM — arms, validate, smoke
 sudo ./setup/02-make-arms.sh --out ./arms --destination USA
 #   follow the validation steps 02-make-arms.sh prints
-sudo ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile smoke --arms-dir ./arms
-python3 ./bench/gvpn-analyze.py ./bench-runs/<newest>     # no sudo
+sudo -E ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile smoke
+python3 ./bench/gvpn-analyze.py ~/gvpn-state/runs/<newest> --floor-mbps 5 \
+        --markdown ~/8408-report.md                       # no sudo
 
 # VM — the real run
 tmux new -s bench
-sudo ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --arms-dir ./arms --detach
+sudo -E ./bench/gvpn-bench.sh -s <IPERF_HOST> --profile soak --detach
 
 # optional, Phase 4 only, never during a run
 ./setup/03-fetch-sources.sh --out ~/src                # NO sudo — or it clones into /root
@@ -307,7 +308,7 @@ sudo ./setup/04-build-patched.sh --deps                # apt as root, rustup as 
 sudo ./setup/04-build-patched.sh --src ~/src --install # only this step needs root
 ```
 
-**Sudo with a password is fine.** `sudo ./bench/gvpn-bench.sh` authenticates once at launch and the
+**Sudo with a password is fine.** `sudo -E ./bench/gvpn-bench.sh` authenticates once at launch and the
 script then runs as root for its whole life — the `--detach` re-exec and the watchdog it spawns
 inherit that, and nothing inside ever calls `sudo` again. So `sudo: a password is required` from
 `sudo -n true` is not a blocker; type the password at launch and the detached run continues without
@@ -315,8 +316,9 @@ further prompts. Refresh the timestamp with `sudo -v` immediately before startin
 from `tmux` so the run is not tied to the SSH session. NOPASSWD is optional convenience, not a
 requirement — and it is a real privilege change on a box that will hold a funded HOPR identity.
 
-**Result ownership.** `sudo ./bench/gvpn-bench.sh` writes `bench-runs/` as root inside your home, so
-before rsyncing results back: `sudo chown -R deploy: ~/gvpn-8408/bench-runs`.
+**Result ownership.** `sudo -E ./bench/gvpn-bench.sh` writes run output as root, so before
+rsyncing results back: `sudo chown -R deploy: ~/gvpn-state`. `02-make-arms.sh` already does
+this for the state directory it creates; a run started before that fix may still need it.
 
 **`04-build-patched.sh --deps` handles the split for you**: apt packages go in system-wide as root,
 while rustup is installed for `$SUDO_USER` — so `/home/deploy/.cargo`, not `/root/.cargo`. Source

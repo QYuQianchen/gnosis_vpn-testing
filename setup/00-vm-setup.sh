@@ -34,13 +34,15 @@ set -euo pipefail
 # command someone has to remember to retype. `set -a` exports what it sets, which
 # is what lets the bench script inherit the same values. Flags still win: they are
 # parsed after this.
-CONFIG_FILE="${GVPN_CONFIG:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/gvpn.conf}"
-if [ -r "$CONFIG_FILE" ]; then
-  set -a; . "$CONFIG_FILE"; set +a
-  CONFIG_LOADED="$CONFIG_FILE"
-else
-  CONFIG_LOADED=""
-fi
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
+CONFIG_FILE="${GVPN_CONFIG:-$GVPN_KIT/gvpn.conf}"
+CONFIG_LOADED="${GVPN_CONF_LOADED:-}"
+
+# Create the state directory up front, owned by the invoking user. Everything the
+# repo must never contain lives here -- runs, rendered arms, faucet codes,
+# identity backups -- and it is outside the worktree so a deploy cannot touch it.
+gvpn_state_init
+echo "state directory: $GVPN_STATE"
 
 NETWORK="${GVPN_NETWORK:-jura-prod}"
 CHANNEL="${GVPN_CHANNEL:-stable}"

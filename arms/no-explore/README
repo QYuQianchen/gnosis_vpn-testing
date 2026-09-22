@@ -1,0 +1,4 @@
+ONE VARIABLE. Identical to auto except return_path_exploration = 0. Keeps full
+relay diversity but stops the 10% of return draws that ignore quality entirely.
+If auto and pin-planner differ but auto and no-explore do not, the exploration
+term is not the problem and the spread across GOOD relays is.

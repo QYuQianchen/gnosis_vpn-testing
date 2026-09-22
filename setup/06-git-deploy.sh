@@ -39,6 +39,8 @@
 #
 set -euo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
+
 WORKTREE="${GVPN_WORKTREE:-$HOME/gvpn-8408}"
 BRANCH="${GVPN_BRANCH:-main}"
 MODE=inplace
@@ -110,15 +112,32 @@ if [ "$MODE" = inplace ]; then
   git -C "$WORKTREE" config receive.denyCurrentBranch updateInstead
 
   say "push-to-checkout hook"
-  cat > "$GITDIR/hooks/push-to-checkout" <<'HOOK'
+  cat > "$GITDIR/hooks/push-to-checkout" <<HOOK
 #!/bin/sh
 set -e
+# REFUSE TO DEPLOY DURING A RUN.
+#
+# push-to-checkout rewrites script files in place, and bash reads a script
+# incrementally as it executes -- replacing gvpn-bench.sh under a running bench
+# can make it jump to a wrong offset and execute garbage. Worse and quieter: a
+# push can swap the analysis or an arm's planner settings halfway through a
+# study, so the first twenty cycles and the last twenty measure different things
+# and nothing in the output says so.
+#
+# Rejecting the push is the right failure. The alternative -- deploying anyway
+# and hoping -- costs a 40-hour soak.
+if [ -e "$GVPN_RUN_LOCK" ]; then
+  echo "  !! REFUSING TO DEPLOY: a benchmark run is in progress" >&2
+  echo "     \$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
+  echo "     Wait for it to finish, or remove the lock if it is stale:" >&2
+  echo "       rm $GVPN_RUN_LOCK" >&2
+  exit 1
+fi
 git update-index -q --refresh
 # --reset makes the pushed tree authoritative for TRACKED paths, replacing a
 # stale hand-copied file even though it is currently untracked. Paths that are
-# not in the tree -- arms/, bench-runs/, faucet-codes, BUILD.txt -- are left
-# exactly as they are, which is what keeps a deploy from eating a live run.
-git read-tree -u --reset "$1"
+# not in the tree are left exactly as they are.
+git read-tree -u --reset "\$1"
 HOOK
   chmod +x "$GITDIR/hooks/push-to-checkout"
   write_post_receive "$GITDIR/hooks"
@@ -132,6 +151,12 @@ else
   cat > "$BARE/hooks/post-receive" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+if [ -e "$GVPN_RUN_LOCK" ]; then
+  echo "  !! NOT deploying: a benchmark run is in progress" >&2
+  echo "     \$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
+  echo "     The push was stored; re-push after the run, or: rm $GVPN_RUN_LOCK" >&2
+  exit 0
+fi
 while read -r _old _new ref; do
   [ "\$ref" = "refs/heads/$BRANCH" ] || continue
   mkdir -p "$WORKTREE"
@@ -168,8 +193,16 @@ With an SSH config alias (docs/dev-workflow.md), nicer as:
 
 Thereafter:  edit -> git commit -> git push vm $BRANCH
 
-REPLACED BY A DEPLOY (tracked):    setup/ bench/ docs/ README.md gvpn.conf
-NEVER TOUCHED (gitignored):        arms/ bench-runs/ faucet-codes BUILD.txt
+REPLACED BY A DEPLOY (tracked):  setup/ bench/ lib/ tools/ tests/ docs/
+                                 arms/ (TEMPLATES only) studies/ results/
+                                 Makefile README.md gvpn.conf
+OUT OF REACH ENTIRELY:           $GVPN_STATE -- runs, rendered arms, secrets,
+                                 identity backups. Outside the worktree, so no
+                                 deploy and no \`git clean\` can touch them.
+
+A PUSH IS REJECTED while $GVPN_RUN_LOCK exists, i.e. while a benchmark is
+running. That is deliberate: a deploy rewrites script files in place and bash
+reads a script as it executes.
 
 Make sure your LOCAL copy is current before the first push -- it becomes the
 source of truth for every tracked file on this machine.

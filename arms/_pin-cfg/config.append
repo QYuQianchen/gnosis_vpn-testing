@@ -1,0 +1,8 @@
+
+[strategy]
+min_open_channels    = 1
+target_open_channels = 1
+
+[strategy.channel_allowlist]
+enabled = true
+peers   = ["@RELAY@"]
