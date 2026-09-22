@@ -17,13 +17,14 @@ BRANCH  ?= main
 # Newest run in the state directory -- what `make report` reads by default.
 RUN ?= $(shell ls -1dt $(STATE)/runs/*/ 2>/dev/null | head -1)
 
-.PHONY: help push test hooks smoke dry soak report publish arms status clean-runs
+.PHONY: help push test hooks smoke dry soak report publish arms status clean-runs backup
 
 help:
 	@echo "make hooks         install the pre-commit secret scan (once per clone)"
 	@echo "make test          run the analyzer tests against fabricated runs"
 	@echo "make push          push $(BRANCH) to $(ORIGIN) and $(VM)"
 	@echo "make status        what is installed and whether a run is in progress"
+	@echo "make backup        encrypted, verified identity backup      [VM, sudo]"
 	@echo "make arms          render arm templates into $(STATE)/arms   [VM, sudo]"
 	@echo "make dry           print the schedule without running it     [VM]"
 	@echo "make smoke         10-minute rig check                       [VM, sudo]"
@@ -59,6 +60,9 @@ status:
 	@echo "arms:  $$(ls $(STATE)/arms 2>/dev/null | tr '\n' ' ')"
 	@echo "runs:  $$(ls -1 $(STATE)/runs 2>/dev/null | wc -l) recorded"
 	@gnosis_vpn-ctl info 2>/dev/null | head -2 || true
+
+backup:
+	sudo -E ./tools/backup-identity.sh
 
 arms:
 	sudo -E ./setup/02-make-arms.sh

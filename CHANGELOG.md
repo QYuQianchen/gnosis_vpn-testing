@@ -20,6 +20,12 @@ measurement method, the analysis, the profiles. Not for docs or comments.
 - **Deploys blocked during a run.** `gvpn-bench.sh` maintains `$GVPN_STATE/run.lock`;
   the push-to-checkout hook rejects a push while it exists. Previously a push
   mid-soak could corrupt the running bench or swap the analysis under a study.
+- **Deploys refuse a worktree they cannot fully write.** A directory left by a
+  `sudo` run is root-owned, and `git read-tree` fails partway through it with a
+  message that names only the symptom — leaving the worktree half-deployed. The
+  hook now checks ownership first and says what to move. (The check has to use
+  an absolute path: `push-to-checkout` runs with cwd set to `.git`, not the
+  worktree, so scanning `.` would silently always pass.)
 - **Secret scan on commit.** `tools/scan-secrets.sh`, wired in by
   `tools/install-hooks.sh`, refuses addresses and peer IDs in staged content —
   including in files that are supposed to be tracked.
@@ -29,6 +35,14 @@ measurement method, the analysis, the profiles. Not for docs or comments.
   `02-make-arms.sh` to change a planner setting wiped the marker on a `pin-cfg-*`
   arm, so the next run treated it as never funded — destroying the funded
   identity and spending a faucet code with nothing to show for it.
+- **`tools/backup-identity.sh`** (`make backup`) — encrypted identity backup and
+  restore. Replaces a runbook `gpg -c` line that could not work: with `tar`
+  occupying stdin on a headless box, gpg-agent has no terminal to prompt on and
+  dies with `Inappropriate ioctl for device`. Uses `openssl enc` with the
+  passphrase on a file descriptor: no agent, no keyring. It stops the service
+  before reading the identity, verifies the archive by decrypting it, and on
+  restore checks the archive before touching anything and keeps the identity it
+  replaces.
 - **`studies/`** — one tracked config per experiment, named in the report.
 - **`results/`** — committed reports (markdown, summary.csv, manifest.json).
 - **`tests/`** — the analyzer is checked against fabricated runs, including the

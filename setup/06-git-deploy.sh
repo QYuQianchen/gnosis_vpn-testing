@@ -133,6 +133,35 @@ if [ -e "$GVPN_RUN_LOCK" ]; then
   echo "       rm $GVPN_RUN_LOCK" >&2
   exit 1
 fi
+# REFUSE TO DEPLOY INTO SOMEONE ELSE'S FILES.
+#
+# Most of this kit runs under sudo, so a directory it wrote into the worktree is
+# owned by root -- \`sudo 02-make-arms.sh\` used to create arms/, \`sudo
+# gvpn-bench.sh\` used to create bench-runs/. read-tree then cannot write inside
+# them, and git's own message says only
+#
+#     fatal: cannot create directory at 'arms/_pin-cfg': Permission denied
+#
+# which names the symptom and not the cause. Worse, read-tree is not atomic: by
+# the time it hits the unwritable path it has already rewritten other files, so
+# the worktree is left half-deployed. Checking first costs one find.
+#
+# NOTE: this hook runs with the cwd set to the .git DIRECTORY, not the worktree
+# -- \`git rev-parse --show-toplevel\` does not help during a push either, which is
+# why the path is baked in at install time, the same as in post-receive. Scanning
+# "." here would quietly scan .git and always pass.
+me="\$(id -un)"
+bad="\$(find "$WORKTREE" -path "$WORKTREE/.git" -prune -o ! -user "\$me" -print 2>/dev/null | head -5)"
+if [ -n "\$bad" ]; then
+  echo "  !! REFUSING TO DEPLOY: paths in the worktree are not owned by \$me:" >&2
+  echo "\$bad" | sed 's/^/       /' >&2
+  echo "     These are leftovers from a sudo run. Move them into the state" >&2
+  echo "     directory -- they do not belong in the worktree (docs/migration.md):" >&2
+  echo "       sudo mv arms ~/gvpn-state/arms-old" >&2
+  echo "       sudo mv bench-runs/* ~/gvpn-state/runs/ && sudo rmdir bench-runs" >&2
+  echo "       sudo chown -R \$me: ~/gvpn-state" >&2
+  exit 1
+fi
 git update-index -q --refresh
 # --reset makes the pushed tree authoritative for TRACKED paths, replacing a
 # stale hand-copied file even though it is currently untracked. Paths that are

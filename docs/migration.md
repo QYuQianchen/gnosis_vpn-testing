@@ -31,35 +31,100 @@ pgrep -af gvpn-bench.sh          # must print nothing
 ls bench-runs/*/deadline 2>/dev/null   # must print nothing
 ```
 
+The kit now has a script for this — `make backup` — which stops the service,
+encrypts, restarts, then decrypts what it wrote to prove it is readable. The
+commands below are what it runs, for when you want to do it by hand.
+
+`openssl` rather than `gpg` on purpose. `gpg -c` asks its agent to prompt for a
+passphrase, and on a headless server with `tar` already occupying stdin the agent
+has no terminal to prompt on — it fails with `problem with the agent:
+Inappropriate ioctl for device`. `openssl enc` takes the passphrase on a file
+descriptor, needs no agent and no keyring, and is installed everywhere.
+
 ```sh
-mkdir -p ~/gvpn-state/identity-backup && chmod 700 ~/gvpn-state/identity-backup
+umask 077
+mkdir -p ~/gvpn-state/identity-backup
+
+read -rsp 'Backup passphrase: ' BK; echo
+read -rsp 'Again: '            BK2; echo
+[ "$BK" = "$BK2" ] || { echo "MISMATCH - start over"; unset BK BK2; }
+
+OUT=~/gvpn-state/identity-backup/identity-$(date -u +%Y%m%d).tar.gz.enc
+
+# Stop the service first: copying the identity while it is running can catch a
+# half-written file, and a backup that restores to a corrupt identity is worse
+# than none, because you will not find out until you need it.
 sudo systemctl stop gnosisvpn
 sudo tar czf - -C /var/lib/gnosisvpn .config \
-  | gpg -c --cipher-algo AES256 \
-        -o ~/gvpn-state/identity-backup/identity-$(date -u +%Y%m%d).tar.gz.gpg
+  | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+      -pass fd:3 -out "$OUT" 3< <(printf %s "$BK")
 sudo systemctl start gnosisvpn
+
+# VERIFY IT. A backup you have never restored is not a backup, it is a hope.
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+      -pass fd:3 -in "$OUT" 3< <(printf %s "$BK") | tar tzf -
+
+unset BK BK2
+ls -l "$OUT"
 ```
+
+The listing must show `.config/gnosisvpn-hopr.id` — that is the file that is the
+identity. `3< <(printf %s "$BK")` passes the passphrase through a pipe rather
+than a here-string, so it never touches a temp file, and it survives a passphrase
+containing quotes or `$`.
 
 Copy that file off the VM. An encrypted backup that only exists on the machine it
 protects is not a backup.
 
+To restore, later:
+
+```sh
+sudo systemctl stop gnosisvpn
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 \
+      -in identity-YYYYMMDD.tar.gz.enc 3< <(printf %s "$BK") \
+  | sudo tar xzf - -C /var/lib/gnosisvpn
+sudo chown -R gnosisvpn: /var/lib/gnosisvpn/.config 2>/dev/null
+sudo systemctl start gnosisvpn
+```
+
 ## Move the state
+
+**These need `sudo`.** `arms/` and `bench-runs/` were written by scripts run
+under `sudo`, so they are owned by root even though they sit in your home
+directory. That is also why this step cannot be skipped: the deploy runs as you,
+and `git read-tree` cannot create `arms/_pin-cfg/` inside a root-owned `arms/`.
+Skipping it produces exactly this, which names the symptom and not the cause:
+
+```
+fatal: cannot create directory at 'arms/_pin-cfg': Permission denied
+ ! [remote rejected] main -> main (push-to-checkout hook declined)
+```
 
 ```sh
 cd ~/gvpn-8408
 mkdir -p ~/gvpn-state/{runs,arms,secrets}
 chmod 700 ~/gvpn-state/secrets
 
-[ -d bench-runs ] && mv bench-runs/* ~/gvpn-state/runs/ 2>/dev/null; rmdir bench-runs 2>/dev/null
-[ -d arms ]       && mv arms         ~/gvpn-state/arms-old
+[ -d bench-runs ] && sudo mv bench-runs/* ~/gvpn-state/runs/ 2>/dev/null
+sudo rmdir bench-runs 2>/dev/null
+[ -d arms ]       && sudo mv arms    ~/gvpn-state/arms-old
 # The bench now looks for codes here by default; leaving them in the repo means
 # the next pin-cfg arm finds none and the run aborts at that arm.
 [ -f faucet-codes ]      && mv faucet-codes      ~/gvpn-state/secrets/
 [ -f faucet-codes.used ] && mv faucet-codes.used ~/gvpn-state/secrets/
 chmod 600 ~/gvpn-state/secrets/faucet-codes* 2>/dev/null
 
+sudo chown -R "$(id -un)": ~/gvpn-state
+
 ls ~/gvpn-state/runs | head        # your old runs, still there
+
+# nothing left in the worktree that the deploy user cannot write
+find . -path ./.git -prune -o ! -user "$(id -un)" -print 2>/dev/null | head
 ```
+
+The last command must print nothing. From this version on the deploy hook runs
+that check itself and refuses the push with the real explanation rather than
+letting `read-tree` fail halfway through rewriting the worktree.
 
 `arms/` becomes `arms-old` rather than moving into place, because the incoming
 repo has an `arms/` of its own — the templates — and the old directory holds
