@@ -11,8 +11,8 @@ or gvpn.conf assigns it anywhere (NAME=, local/declare/export/readonly NAME,
 read ... NAME, for NAME in, printf -v NAME, getopts .. NAME).
 
 Deliberately simple and conservative: it reads text, not an AST, so it strips
-comments, single-quoted strings and heredoc bodies with a quoted delimiter
-(which the shell does not expand) before looking.
+comments, single-quoted strings, escaped `\\$` and heredoc bodies with a quoted
+delimiter (which the shell does not expand) before looking.
 """
 import pathlib
 import re
@@ -53,6 +53,7 @@ def strip(text):
                 out.append(""); i += 1
             out.append(""); i += 1
             continue
+        ln = ln.replace("\\$", "")                  # \$X is literal text, not a use
         ln = re.sub(r"'[^']*'", "''", ln)
         ln = re.sub(r'(^|\s)#.*$', r'\1', ln)
         out.append(ln); i += 1

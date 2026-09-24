@@ -268,12 +268,14 @@ if [ -d "$KIT/.git" ]; then
   fi
 fi
 
-if [ -e "$GVPN_RUN_LOCK" ]; then
-  bad "a run is already in progress ($GVPN_RUN_LOCK -> $(readlink -f "$GVPN_RUN_LOCK" 2>/dev/null))"
-  note "make status ; remove the lock only if it is stale."
-else
-  pass "no run in progress"
-fi
+gvpn_lock_state
+case "$GVPN_LOCK_STATE" in
+  none)    pass "no run in progress" ;;
+  live)    bad "a run is in progress: $GVPN_LOCK_RUN (pid $GVPN_LOCK_PID)" ;;
+  stale)   pass "no run in progress (a stale lock from $GVPN_LOCK_RUN; the bench clears it)" ;;
+  unknown) bad "a run lock with no owner recorded: $GVPN_LOCK_RUN"
+           note "fix: ./tools/run-lock.sh --clear   (clears it only if no bench is running)" ;;
+esac
 
 [ "$fails" -eq 0 ] || die "$fails static check(s) failed. Nothing has been run."
 

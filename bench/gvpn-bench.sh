@@ -848,12 +848,27 @@ mkdir -p "$RUN_DIR" || exit 1
 # exists: push-to-checkout rewrites script files in place, and bash reads a
 # script incrementally as it runs, so a push mid-soak can corrupt the running
 # bench or silently swap the analysis under a study that is already half done.
-if [ -e "$GVPN_RUN_LOCK" ] && [ "${GVPN_RUN_ID:-}" = "" ]; then
-  echo "a run is already in progress: $(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
-  echo "finish or stop it first, or remove $GVPN_RUN_LOCK if it is stale." >&2
-  exit 1
+#
+# A detached child (GVPN_RUN_ID set) inherits its parent's lock. Otherwise: a
+# live lock refuses; a stale one -- its bench is gone -- is cleared and said so.
+if [ -z "${GVPN_RUN_ID:-}" ]; then
+  gvpn_lock_state
+  case "$GVPN_LOCK_STATE" in
+    live)    echo "a run is in progress: $GVPN_LOCK_RUN (pid $GVPN_LOCK_PID)" >&2; exit 1 ;;
+    unknown) echo "a run lock with no owner recorded: $GVPN_LOCK_RUN" >&2
+             echo "settle it with: ./tools/run-lock.sh --clear" >&2; exit 1 ;;
+    stale)   echo "clearing a stale run lock: $GVPN_LOCK_RUN (its bench is not running)" >&2
+             rm -f "$GVPN_RUN_LOCK" ;;
+  esac
 fi
+# Until cleanup() takes over, any exit -- including an abort under set -u, which
+# is how the first trial left a lock behind -- releases the lock. Armed before
+# the lock is taken, so there is no line in between that can fail.
+release_lock() { [ "$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" = "$RUN_DIR" ] && rm -f "$GVPN_RUN_LOCK"; }
+trap release_lock EXIT
+trap 'exit 130' INT TERM
 ln -sfn "$RUN_DIR" "$GVPN_RUN_LOCK" 2>/dev/null || true
+echo $$ > "$RUN_DIR/bench.pid"
 RUN_LOG="$RUN_DIR/run.log"
 DEADMAN_LOG="$RUN_DIR/deadman.log"
 WATCHDOG="$RUN_DIR/watchdog.sh"
@@ -877,6 +892,8 @@ if [ "$DETACH" = 1 ]; then
         -o "$OUT_ROOT" \
         ${DESTINATION:+-D "$DESTINATION"} \
         >>"$RUN_DIR/detached.log" 2>&1 </dev/null &
+  echo $! > "$RUN_DIR/bench.pid"   # the lock now belongs to the child (nohup/setsid exec it)
+  trap - EXIT
   echo "$RUN_DIR"; exit 0
 fi
 

@@ -19,9 +19,26 @@ move a number or break a node — not for docs or comments.
   discarding exactly the fastest sessions. A transfer too short for the window is
   now scored by its whole-transfer rate (no tail or stall figures), and the report
   counts such transfers in a caveat.
+- **The aborted trial left the run lock behind, and every push was refused.** The
+  lock was taken 27 lines before the cleanup trap was installed, so an abort in
+  between never released it, and nothing could tell a dead run's lock from a
+  live one. Now the release is armed before the lock is taken; the bench records
+  its PID in `<run>/bench.pid` (a detached launch hands it to the child); and the
+  bench, preflight, `make status` and the deploy hook treat a lock whose bench is
+  not running as stale — the bench and the hook clear it, and say so.
+  `tools/run-lock.sh [--clear]` shows or clears it by hand. The hook lives in the
+  VM's `.git/hooks`, which a push does not update: re-run
+  `./setup/06-git-deploy.sh` once to install it. `tests/run-lock-tests.sh`
+  covers every state in all three copies of the test.
+- **`make report` picked the aborted trial** (`no summary.csv in …`): it chose
+  the newest run directory, and a run that stops before its first session has
+  none. It now picks the newest run with a `summary.csv`, and the analyzer,
+  given an aborted run explicitly, says the run stopped before its first session
+  and prints the last lines of its log.
 - New suites: `tests/run-bench-tests.sh` runs the real `gvpn-bench.sh --trial`
   of the shipped study with the client, systemd and network stubbed, and checks
-  the manifest, both arms' sessions, the lock, config rollback and the report.
+  the manifest, both arms' sessions, config rollback and the report, and the
+  lock through a stale lock, a `--detach` launch and an abort.
   `tests/run-lint-tests.sh` syntax-checks every script and lists variables used
   without a default and never assigned (`tests/unbound.py`). Both fail on the
   original bug.

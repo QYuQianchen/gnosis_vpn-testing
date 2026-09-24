@@ -8,7 +8,9 @@ FLOOR  ?=
 VM     ?= vm
 ORIGIN ?= origin
 BRANCH ?= main
-RUN    ?= $(shell ls -1dt $(STATE)/runs/*/ 2>/dev/null | head -1)
+# The newest run that recorded at least one session; a run that aborted before
+# its first one (no summary.csv) has nothing to report. RUN=<dir> picks one.
+RUN    ?= $(patsubst %/summary.csv,%,$(firstword $(shell ls -1t $(STATE)/runs/*/summary.csv 2>/dev/null)))
 need_study = $(if $(STUDY),,$(error set STUDY=<name from studies/>))
 
 .PHONY: help hooks test push status diagnose restore-config backup fix-perms \
@@ -47,8 +49,7 @@ push:
 	git push $(ORIGIN) $(BRANCH) && git push $(VM) $(BRANCH)
 
 status:
-	@[ -e "$(STATE)/run.lock" ] && echo "RUN IN PROGRESS: $$(readlink $(STATE)/run.lock) (deploys blocked)" \
-	  || echo "no run in progress"
+	@./tools/run-lock.sh | head -1
 	@echo "arms:    $$(ls $(STATE)/arms 2>/dev/null | tr '\n' ' ')"
 	@echo "runs:    $$(ls -1 $(STATE)/runs 2>/dev/null | wc -l)"
 	@echo "service: $$(systemctl is-active gnosisvpn)   config -> $$(readlink -f /etc/gnosisvpn/config.toml)"
@@ -91,14 +92,14 @@ smoke:
 	sudo -E ./bench/gvpn-bench.sh --profile smoke
 
 report:
-	$(if $(RUN),,$(error no runs under $(STATE)/runs))
+	$(if $(RUN),,$(error no run under $(STATE)/runs has recorded a session yet))
 	python3 ./bench/gvpn-analyze.py "$(RUN)" $(if $(FLOOR),--floor-mbps $(FLOOR)) \
 	        --markdown "$(RUN)/report.md" --csv "$(RUN)/sessions.csv"
 
 # Raw logs stay on the VM; the findings are what must outlive it.
 publish:
 	$(need_study)
-	$(if $(RUN),,$(error no runs under $(STATE)/runs))
+	$(if $(RUN),,$(error no run under $(STATE)/runs has recorded a session yet))
 	@mkdir -p results/$(STUDY)
 	@cp "$(RUN)/report.md" "$(RUN)/summary.csv" "$(RUN)/manifest.json" results/$(STUDY)/
 	@cp "$(RUN)/finished.json" results/$(STUDY)/ 2>/dev/null || true

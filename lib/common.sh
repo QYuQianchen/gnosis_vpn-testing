@@ -33,6 +33,34 @@ GVPN_ARM_CONFIG="$GVPN_CONFIG_DIR/config-gvpn-arm.toml"
 GVPN_CONFIG_ORIG="$GVPN_CONFIG_DIR/.gvpn-config-original"  # original link target
 GVPN_SERVICE_LOG="${GVPN_SERVICE_LOG:-/var/log/gnosisvpn/gnosisvpn.log}"
 
+# THE RUN LOCK is a symlink to the running run's directory, and that run writes
+# its PID to <run>/bench.pid. The lock is live only while that process exists:
+# a bench that dies before its cleanup (a crash, kill -9, an abort under set -u)
+# leaves a lock that can be PROVEN stale, instead of blocking deploys until
+# someone removes it by hand.
+#
+#   gvpn_lock_state   sets GVPN_LOCK_STATE = none | live | stale | unknown,
+#                     plus GVPN_LOCK_RUN (the run dir) and GVPN_LOCK_PID.
+# `unknown` is a lock written before bench.pid existed; whoever is not itself a
+# bench can settle it with `pgrep` (tools/run-lock.sh, the deploy hook).
+gvpn_lock_state() {
+  GVPN_LOCK_RUN=""; GVPN_LOCK_PID=""
+  if [ ! -L "$GVPN_RUN_LOCK" ] && [ ! -e "$GVPN_RUN_LOCK" ]; then
+    GVPN_LOCK_STATE=none; return 0
+  fi
+  GVPN_LOCK_RUN="$(readlink "$GVPN_RUN_LOCK" 2>/dev/null || true)"
+  GVPN_LOCK_PID="$(cat "$GVPN_LOCK_RUN/bench.pid" 2>/dev/null || true)"
+  if [ ! -d "$GVPN_LOCK_RUN" ] || [ -f "$GVPN_LOCK_RUN/finished.json" ]; then
+    GVPN_LOCK_STATE=stale
+  elif [ -z "$GVPN_LOCK_PID" ]; then
+    GVPN_LOCK_STATE=unknown
+  elif grep -qa 'gvpn-bench' "/proc/$GVPN_LOCK_PID/cmdline" 2>/dev/null; then
+    GVPN_LOCK_STATE=live
+  else
+    GVPN_LOCK_STATE=stale
+  fi
+}
+
 gvpn_state_init() {
   mkdir -p "$GVPN_RUNS_DIR" "$GVPN_ARMS_DIR" "$GVPN_BACKUP_DIR"
   chmod 700 "$GVPN_BACKUP_DIR" 2>/dev/null || true

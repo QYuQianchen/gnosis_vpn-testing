@@ -63,8 +63,9 @@ tools/diagnose.sh          why the service will not start (read-only)
       restore-config.sh    reinstall a damaged packaged network config
       close-channels.py    trim channels via the Safe, through blokli (study 2)
       backup-identity.sh   encrypted identity backup
+      run-lock.sh          is the run lock live? --clear removes a dead bench's
       scan-secrets.sh, install-hooks.sh, fix-worktree-ownership.sh
-tests/                     make test: lint, config, node lifecycle, routing, routes, a sandboxed
+tests/                     make test: lint, config, node lifecycle, routing, routes, run lock, a sandboxed
                            bench --trial, analyzer, scanner
 ```
 

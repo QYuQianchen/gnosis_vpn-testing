@@ -472,7 +472,17 @@ def main():
 
     run = Path(args.run_dir)
     if not (run / "summary.csv").exists():
-        sys.exit(f"no summary.csv in {run}")
+        # A run that stopped before its first session: say so, with its last words.
+        tail = ""
+        for name in ("run.log", "detached.log"):
+            f = run / name
+            if f.exists() and f.stat().st_size:
+                tail = "\n".join(f.read_text(errors="ignore").splitlines()[-5:])
+                break
+        sys.exit(f"{run}: no sessions were recorded (no summary.csv) -- the run stopped "
+                 f"before its first session, so there is nothing to report."
+                 + (f"\nlast lines of its log:\n{tail}" if tail else "") +
+                 "\n`make report` without RUN= picks the newest run that has sessions.")
 
     manifest = {}
     if (run / "manifest.json").exists():

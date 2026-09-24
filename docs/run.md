@@ -35,7 +35,7 @@ Host gvpn-vm
 ```
 
 A push is refused while a run is in progress — a deploy rewrites scripts as they
-execute.
+execute. A lock left by a bench that died is cleared automatically.
 
 ## 2 · Prepare the node — once
 
@@ -190,6 +190,7 @@ To put the network config back after an arm, without repairing anything:
 | `NO RESULT: the planner logged no candidate paths` | planner DEBUG is not active; re-run `00-vm-setup.sh`. Not the same as 1 route |
 | `auto` reads candidates = 1 | the node holds one channel — the baseline has no diversity to lose, every comparison is void |
 | `pin-planner` reads candidates > 1 | the override is not applied — `sudo ./bench/use-arm.sh --show` |
+| push rejected, "a benchmark run is in progress" | `./tools/run-lock.sh` on the VM says whether that bench is alive; `--clear` removes the lock only if it is not. The hook clears a dead bench's lock itself (after `./setup/06-git-deploy.sh` has been re-run once, to install the current hook) |
 | push rejected, "not owned by deploy" | `./tools/fix-worktree-ownership.sh --apply` on the VM |
 | report says `THE PIN DID NOT TAKE` | the run compared `auto` with itself; discard it |
 

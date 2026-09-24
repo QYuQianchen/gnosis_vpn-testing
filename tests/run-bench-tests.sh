@@ -105,8 +105,15 @@ echo "bench (a real --trial, client and network stubbed)"
 bash "$KIT/setup/02-make-arms.sh" >"$SB/arms.out" 2>&1 && ok "arms render" \
   || { bad "arms did not render"; cat "$SB/arms.out"; exit 1; }
 
+# A lock left by a bench that died (here: a PID that is not running) must not
+# block the next run -- the bench clears it and says so.
+mkdir -p "$SB/state/runs/19990101-000000"; echo 999999 > "$SB/state/runs/19990101-000000/bench.pid"
+ln -s "$SB/state/runs/19990101-000000" "$SB/state/run.lock"
+
 timeout 600 bash "$KIT/bench/gvpn-bench.sh" --trial >"$SB/bench.out" 2>&1
 rc=$?
+grep -q 'clearing a stale run lock' "$SB/bench.out" && ok "a stale lock (dead bench) is cleared" \
+  || bad "the stale lock was not cleared"
 [ "$rc" = 0 ] && ok "trial exits 0" || { bad "trial exited $rc:"; tail -25 "$SB/bench.out" | sed 's/^/        /'; }
 grep -q 'unbound variable' "$SB/bench.out" && bad "unbound variable: $(grep -m1 'unbound variable' "$SB/bench.out")"
 
@@ -123,6 +130,27 @@ n=$(awk -F, 'NR>1 && $NF=="ok"' "$RUN/summary.csv" 2>/dev/null | wc -l)
 [ ! -e "$SB/state/run.lock" ] && ok "run lock released" || bad "run lock left behind"
 [ "$(readlink "$SB/etc/config.toml")" = "$SB/etc/config-jura-prod.toml" ] \
   && ok "cleanup restored the network config" || bad "node left on an arm: $(readlink "$SB/etc/config.toml")"
+
+# --detach (what `make launch` uses): the parent returns at once and hands the
+# lock to the child, which must hold it -- live -- until it finishes.
+DRUN="$(timeout 30 bash "$KIT/bench/gvpn-bench.sh" --trial --detach 2>"$SB/detach.err" | tail -1)"
+sleep 2
+st="$( . "$KIT/lib/common.sh"; gvpn_lock_state; echo "$GVPN_LOCK_STATE $GVPN_LOCK_RUN" )"
+[ "$st" = "live $DRUN" ] && ok "a detached run holds a live lock" || bad "detached run: lock is '$st', want 'live $DRUN'"
+for _ in $(seq 120); do [ -f "$DRUN/finished.json" ] && break; sleep 1; done
+sleep 1
+[ -f "$DRUN/finished.json" ] && [ ! -e "$SB/state/run.lock" ] && ok "the detached run finished and released the lock" \
+  || bad "detached run: finished=$([ -f "$DRUN/finished.json" ] && echo y || echo n), lock=$(readlink "$SB/state/run.lock" 2>/dev/null)"
+
+# An abort before cleanup() is installed -- how the first trial died, on an
+# unbound variable -- must still release the lock, or every push is refused.
+mkdir -p "$SB/kit2" && cp -a "$KIT/." "$SB/kit2/"
+sed -i 's|^echo \$\$ > "\$RUN_DIR/bench.pid"$|&\n: "$GVPN_TEST_UNSET_VARIABLE"|' "$SB/kit2/bench/gvpn-bench.sh"
+grep -q GVPN_TEST_UNSET_VARIABLE "$SB/kit2/bench/gvpn-bench.sh" || bad "could not plant the abort"
+timeout 60 bash "$SB/kit2/bench/gvpn-bench.sh" --trial >"$SB/abort.out" 2>&1
+grep -q 'unbound variable' "$SB/abort.out" && [ ! -e "$SB/state/run.lock" ] \
+  && ok "an abort under set -u releases the run lock" \
+  || bad "abort left the lock: $(readlink "$SB/state/run.lock" 2>/dev/null) / $(tail -1 "$SB/abort.out")"
 
 python3 "$KIT/bench/gvpn-analyze.py" "$RUN" --floor-mbps 5 >"$SB/report.out" 2>&1 \
   && ok "report renders" || { bad "report failed"; tail -5 "$SB/report.out"; }

@@ -76,6 +76,29 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 # The post-receive hook must not rely on its inherited working directory: during a
 # push GIT_DIR is set, and `git rev-parse --show-toplevel` does not give the
 # worktree. The path is baked in at install time instead.
+# The hooks' run-lock test (POSIX sh; the hook cannot source the kit). Mirrors
+# gvpn_lock_state in lib/common.sh: a lock whose bench is gone is cleared, so a
+# crashed run cannot block deploys forever; a live one refuses.
+lock_check_sh() {
+  printf 'LOCK=%s\n' "$GVPN_RUN_LOCK"
+  cat <<'SH'
+lock_live() {  # true if a bench holds the lock; clears a stale one
+  [ -L "$LOCK" ] || [ -e "$LOCK" ] || return 1
+  LOCK_RUN=$(readlink "$LOCK" 2>/dev/null || true)
+  LOCK_PID=$(cat "$LOCK_RUN/bench.pid" 2>/dev/null || true)
+  if [ -d "$LOCK_RUN" ] && [ ! -f "$LOCK_RUN/finished.json" ]; then
+    if [ -n "$LOCK_PID" ]; then
+      grep -qa gvpn-bench "/proc/$LOCK_PID/cmdline" 2>/dev/null && return 0
+    else
+      pgrep -f 'bench/gvpn-bench\.sh' >/dev/null 2>&1 && return 0
+    fi
+  fi
+  rm -f "$LOCK" && echo "  cleared a stale run lock ($LOCK_RUN: its bench is not running)" >&2
+  return 1
+}
+SH
+}
+
 write_post_receive() {  # write_post_receive HOOKS_DIR
   cat > "$1/post-receive" <<EOF
 #!/usr/bin/env bash
@@ -126,11 +149,11 @@ set -e
 #
 # Rejecting the push is the right failure. The alternative -- deploying anyway
 # and hoping -- costs a 40-hour soak.
-if [ -e "$GVPN_RUN_LOCK" ]; then
+$(lock_check_sh)
+if lock_live; then
   echo "  !! REFUSING TO DEPLOY: a benchmark run is in progress" >&2
-  echo "     \$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
-  echo "     Wait for it to finish, or remove the lock if it is stale:" >&2
-  echo "       rm $GVPN_RUN_LOCK" >&2
+  echo "     \$LOCK_RUN  (pid \${LOCK_PID:-?})" >&2
+  echo "     Wait for it to finish (make status on the VM)." >&2
   exit 1
 fi
 # REFUSE TO DEPLOY INTO SOMEONE ELSE'S FILES.
@@ -184,10 +207,11 @@ else
   cat > "$BARE/hooks/post-receive" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-if [ -e "$GVPN_RUN_LOCK" ]; then
+$(lock_check_sh)
+if lock_live; then
   echo "  !! NOT deploying: a benchmark run is in progress" >&2
-  echo "     \$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" >&2
-  echo "     The push was stored; re-push after the run, or: rm $GVPN_RUN_LOCK" >&2
+  echo "     \$LOCK_RUN  (pid \${LOCK_PID:-?})" >&2
+  echo "     The push was stored; re-push after the run." >&2
   exit 0
 fi
 while read -r _old _new ref; do
@@ -233,9 +257,10 @@ OUT OF REACH ENTIRELY:           $GVPN_STATE -- runs, rendered arms, secrets,
                                  identity backups. Outside the worktree, so no
                                  deploy and no \`git clean\` can touch them.
 
-A PUSH IS REJECTED while $GVPN_RUN_LOCK exists, i.e. while a benchmark is
-running. That is deliberate: a deploy rewrites script files in place and bash
-reads a script as it executes.
+A PUSH IS REJECTED while a benchmark is running ($GVPN_RUN_LOCK, and its
+bench is alive; a lock left by a dead bench is cleared by the hook). That is
+deliberate: a deploy rewrites script files in place and bash reads a script as
+it executes.
 
 Make sure your LOCAL copy is current before the first push -- it becomes the
 source of truth for every tracked file on this machine.
