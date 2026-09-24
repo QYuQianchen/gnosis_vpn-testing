@@ -59,8 +59,19 @@ def make(root, scenario):
                     f"hopr_session_frame_discarded_total {disc}\n"
                     f"hopr_session_ack_outgoing_retransmission_requests_total {prof['retx']}\n")
                 nroutes = prof["routes"]
-                (sd / "gnosisvpn.log").write_text("\n".join(
-                    f'candidate path path="{i}" w=1' for i in range(nroutes)))
+                # The planner's real shape: the route's Display form contains
+                # spaces, and cost/weight fields that vary per line follow it.
+                # A parser that runs `path=` to the next comma counts a pinned
+                # arm as many routes -- this fixture exists to catch that.
+                log = []
+                for j in range(12):
+                    r = j % nroutes
+                    log.append(f"DEBUG hopr_transport::path::planner: weighted candidate path "
+                               f"kind=\"forward\" hops=1 path=0x{r:02x}aa -> 0xdd "
+                               f"cost={rnd.random():.3f} composite_weight={rnd.random():.3f}")
+                log.append(f"DEBUG hopr_transport::path::planner: drawing return paths from "
+                           f"tempered weights count=4 candidates={nroutes} distinct_relayers={nroutes}")
+                (sd / "gnosisvpn.log").write_text("\n".join(log) + "\n")
                 lines.append(f"{cyc},{arm},{ex},{sd},3.2,3,ok")
     (root / "summary.csv").write_text("\n".join(lines) + "\n")
 

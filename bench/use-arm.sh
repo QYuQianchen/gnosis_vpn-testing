@@ -1,414 +1,127 @@
 #!/usr/bin/env bash
 #
-# use-arm.sh -- put one arm's configuration in place by hand, and optionally
-#               connect and count how many distinct routes the planner draws from.
+# use-arm.sh -- install one arm by hand; optionally connect and count routes.
 #
-#   sudo ./bench/use-arm.sh pin-planner
-#   sudo ./bench/use-arm.sh pin-planner --count      # connect, wait, count paths
-#   sudo ./bench/use-arm.sh auto --count
-#   ./bench/use-arm.sh --show                        # what is installed right now
+#   sudo ./bench/use-arm.sh auto --count         # must read many routes
+#   sudo ./bench/use-arm.sh pin-planner --count  # must read 1
+#   sudo ./bench/use-arm.sh --show               # what is installed now
+#   sudo ./bench/use-arm.sh --restore            # back to the network config
 #
-# This is the same swap gvpn-bench.sh performs between arms, extracted so you can
-# do it manually -- for the pin validation, or any time you want to poke at one
-# configuration without starting a benchmark run.
-#
-# WHY ALL THREE PIECES MOVE TOGETHER
-#
-#   An arm is the client config, an optional manual hopr-lib config, and the
-#   systemd drop-in that points the service at it. All three are rewritten on
-#   every switch, INCLUDING being removed when an arm does not use them. Leaving
-#   a planner-pinned hopr.yaml behind would silently pin the next arm too, and
-#   the whole comparison would quietly become meaningless.
-#
+# Installing an arm = write its config to config-gvpn-arm.toml and re-point the
+# config.toml symlink (lib/common.sh). If the service then fails to start, the
+# original network config is put back and the service restarted, so this never
+# leaves the node down.
 set -euo pipefail
+. "$(cd "$(dirname "$0")/.." && pwd)/lib/common.sh"
 
-KIT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$KIT/lib/common.sh"
-
-# Rendered instances in the state directory, not the repo's templates: a template
-# has no config.toml and no addresses, so it cannot be installed.
-ARMS_DIR="$GVPN_ARMS_DIR"
-CONFIG_PATH="${GNOSISVPN_CONFIG_PATH:-/etc/gnosisvpn/config.toml}"
-
-# ---------------------------------------------------------------- config IO --
-#
-# /etc/gnosisvpn/config.toml is a SYMLINK the installer uses to select a network
-# (-> config-jura-prod.toml). Two consequences this kit got wrong:
-#
-#   cp FILE config.toml     follows the link and OVERWRITES the packaged network
-#                           config, destroying it -- there is no other copy.
-#   cp -a config.toml BAK   copies the LINK, not its contents, so the "backup"
-#                           is a second symlink to the file being overwritten.
-#                           Restoring from it restores nothing.
-#
-# So an arm is installed the way the installer itself switches networks: write a
-# file of our own and re-point the symlink. The packaged configs are never
-# touched, and rollback is re-pointing the link back.
-ARM_CONFIG="${GVPN_ARM_CONFIG:-/etc/gnosisvpn/config-gvpn-arm.toml}"
-CONFIG_ORIG_MARKER="${GVPN_CONFIG_ORIG:-/etc/gnosisvpn/.gvpn-config-original}"
-
-# Remember what config.toml pointed at BEFORE this kit ever touched it, once.
-remember_original_config() {
-  [ -e "$CONFIG_ORIG_MARKER" ] && return 0
-  if [ -L "$CONFIG_PATH" ]; then
-    readlink -f "$CONFIG_PATH" > "$CONFIG_ORIG_MARKER"
-  elif [ -f "$CONFIG_PATH" ]; then
-    # Not a symlink on this node: keep a real copy of the contents.
-    cp "$CONFIG_PATH" "$CONFIG_PATH.gvpn-original"
-    printf '%s\n' "$CONFIG_PATH.gvpn-original" > "$CONFIG_ORIG_MARKER"
-  fi
-}
-
-install_arm_config() {  # install_arm_config SRC
-  remember_original_config
-  cp "$1" "$ARM_CONFIG"
-  chmod 0644 "$ARM_CONFIG"
-  # Match the packaged configs so the worker user can read it.
-  chown --reference="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || echo "$ARM_CONFIG")" \
-        "$ARM_CONFIG" 2>/dev/null || true
-  ln -sfn "$ARM_CONFIG" "$CONFIG_PATH"
-}
-
-restore_original_config() {
-  local orig; orig="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || true)"
-  [ -n "$orig" ] && [ -e "$orig" ] || return 1
-  ln -sfn "$orig" "$CONFIG_PATH"
-}
-HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
-DROPIN="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf"
-LOG="${GVPN_SERVICE_LOG:-/var/log/gnosisvpn/gnosisvpn.log}"
-DEST="${GVPN_DESTINATION:-UK}"
 CTL="${GVPN_CTL:-gnosis_vpn-ctl}"
+DEST="${GVPN_DESTINATION:-UK}"
 SETTLE="${GVPN_COUNT_SETTLE:-90}"
-READY_TIMEOUT="${GVPN_READY_TIMEOUT:-120}"
-CONNECT_TIMEOUT="${GVPN_CONNECT_TIMEOUT:-180}"
-
-ARM=""; DO_COUNT=0; DO_SHOW=0
-
-usage() {
-  cat <<EOF
-use-arm.sh -- install one arm's config; optionally connect and count paths
-
-Usage: sudo $0 ARM [--count] [--dest ID]
-       $0 --show
-
-  ARM           directory name under $ARMS_DIR
-  --count       after installing: connect, wait ${SETTLE}s, count distinct routes
-  --dest ID     destination to connect to (default: $DEST, from gvpn.conf)
-  --settle S    seconds to let traffic run before counting (default: $SETTLE)
-  --show        print what is currently installed, then exit
-
-Available arms (rendered instances in $ARMS_DIR):
-$(ls "$ARMS_DIR" 2>/dev/null | sed 's/^/  /' || echo "  (none -- run setup/02-make-arms.sh)")
-EOF
-}
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --count)  DO_COUNT=1; shift ;;
-    --show)   DO_SHOW=1; shift ;;
-    --dest)   DEST="$2"; shift 2 ;;
-    --settle) SETTLE="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
-    *)  ARM="$1"; shift ;;
-  esac
-done
+READY_TIMEOUT=180; CONNECT_TIMEOUT=180
+LEGACY="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf /etc/gnosisvpn/hopr-arm.yaml"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+ctl_status() { timeout 10 "$CTL" -o plain status 2>/dev/null | head -1; }
 
 show() {
-  say "currently installed"
-  echo "  config.toml destinations:"
-  grep -E '^\[destinations\.|^path' "$CONFIG_PATH" 2>/dev/null | sed 's/^/    /' || true
-  echo "  planner overrides:"
-  sed -n '/\[connection.path_planner\]/,/^$/p' "$CONFIG_PATH" 2>/dev/null | sed 's/^/    /'
-  echo "  drop-in: $([ -f "$DROPIN" ] && echo present || echo '<none>')"
-  [ -f "$DROPIN" ] && sed 's/^/    /' "$DROPIN"
-  echo "  service: $(systemctl is-active gnosisvpn 2>/dev/null || echo '?')"
+  echo "  config.toml -> $(readlink -f "$GVPN_CONFIG_PATH")"
+  head -1 "$GVPN_CONFIG_PATH" 2>/dev/null | grep -q 'GENERATED by gvpn-8408' \
+    && sed -n '1s/.*-- /  arm:        /p' "$GVPN_CONFIG_PATH" \
+    || echo "  arm:        <none -- the network config>"
+  echo "  planner:"
+  sed -n '/^\[connection\.path_planner\]/,/^\[/p' "$GVPN_CONFIG_PATH" 2>/dev/null \
+    | grep -E '^[a-z_]+ *=' | sed 's/^/    /' || echo "    <preset>"
+  echo "  service:    $(systemctl is-active gnosisvpn 2>/dev/null)   client: $(ctl_status || echo '<no answer>')"
 }
 
-[ "$DO_SHOW" = 1 ] && { show; exit 0; }
-[ -n "$ARM" ] || { usage >&2; exit 2; }
+usage() { sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; echo; echo "arms in $GVPN_ARMS_DIR:"; ls "$GVPN_ARMS_DIR" 2>/dev/null | sed 's/^/  /'; }
 
-ARM_DIR="$ARMS_DIR/$ARM"
-[ -d "$ARM_DIR" ] || { echo "no such arm: $ARM_DIR" >&2; usage >&2; exit 1; }
-[ "$(id -u)" -eq 0 ] || { echo "run as root (sudo $0 $ARM)" >&2; exit 1; }
-
-say "installing arm: $ARM"
-[ -r "$ARM_DIR/README" ] && sed 's/^/    /' "$ARM_DIR/README"
-
-# Refuse before touching anything. An arm marked UNAVAILABLE is one whose
-# mechanism has been checked against the source and does not exist; installing
-# it would stop the client and the operator would be debugging their node
-# rather than reading this.
-if [ -f "$ARM_DIR/UNAVAILABLE" ]; then
-  say "ARM '$ARM' CANNOT RUN"
-  sed 's/^/    /' "$ARM_DIR/UNAVAILABLE"
-  exit 2
-fi
-
-"$CTL" disconnect   >/dev/null 2>&1 || true
-"$CTL" stop-client  >/dev/null 2>&1 || true
-systemctl stop gnosisvpn
-sleep 2
-
-install_arm_config "$ARM_DIR/config.toml"
-
-mkdir -p "$(dirname "$DROPIN")"
-# Legacy cleanup: older kit versions installed a hopr-lib YAML here and pointed
-# the service at it with GNOSISVPN_HOPR_CONFIG_PATH. That lever never worked
-# (docs/design.md section 3) and a leftover file would break every arm, so it
-# is removed on every install, not only when switching to generated mode.
-rm -f "$DROPIN" "$HOPR_YAML_DEST"
-echo "    config.toml installed (generated hopr config)"
-
-[ -f "$ARM_DIR/flags" ] && echo "    NOTE: this arm needs service flags: $(tr '\n' ' ' < "$ARM_DIR/flags")"
-if [ -f "$ARM_DIR/PREREQUISITE" ]; then
-  # Installing the config is not the same as the arm being ready. Say so here,
-  # where someone is looking, rather than leaving it to a README nobody reopens.
-  echo
-  echo "    *** THIS ARM HAS AN UNAUTOMATED PREREQUISITE ***"
-  sed 's/^/    /' "$ARM_DIR/PREREQUISITE"
-  echo "    Confirm with --count before running a study with it."
-fi
-
-systemctl daemon-reload
-systemctl start gnosisvpn
-sleep 5
-
-# Roll the node back to whatever it had before this arm touched it. Anything
-# that leaves here must leave a WORKING node: a benchmark tool that bricks the
-# thing it measures is worse than one that refuses to run.
-rollback() {
-  echo "    rolling back to the previous configuration"
-  rm -f "$DROPIN" "$HOPR_YAML_DEST"
-  restore_original_config || echo "    (no recorded original config to restore)"
-  systemctl daemon-reload
-  systemctl restart gnosisvpn
-  sleep 5
-  if systemctl is-active --quiet gnosisvpn; then
-    echo "    service active again (generated config)"
-  else
-    echo "    ROLLBACK ALSO FAILED -- check: journalctl -u gnosisvpn -n 50"
-  fi
-}
-
-if ! systemctl is-active --quiet gnosisvpn; then
-  say "SERVICE DID NOT START"
-
-  # Report the exit STATUS first. systemd's own lines say a unit failed and
-  # nothing about why; the binary's status code is the one piece of evidence
-  # that is always present, and a previous version of this grep threw it away
-  # along with the binary's own message.
-  code="$(systemctl show gnosisvpn -p ExecMainStatus --value 2>/dev/null)"
-  case "$code" in
-    64) why="EX_USAGE: bad command line -- check the service flags drop-in" ;;
-    66) why="EX_NOINPUT: a file it needs could not be OPENED. Not a parse error --
-          the config was never read. Most often the node has never onboarded, so
-          there is no identity yet: gnosis_vpn-ctl start-client 60m" ;;
-    69) why="EX_UNAVAILABLE: a service it depends on is unreachable" ;;
-    70) why="EX_SOFTWARE: internal error" ;;
-    77) why="EX_NOPERM: permission denied" ;;
-    78) why="EX_CONFIG: the config was read and rejected" ;;
-    *)  why="" ;;
+ARM=""; COUNT=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --count)   COUNT=1; shift ;;
+    --dest)    DEST="$2"; shift 2 ;;
+    --settle)  SETTLE="$2"; shift 2 ;;
+    --show)    show; exit 0 ;;
+    --restore) gvpn_restore_original && gvpn_service_restart && { echo "network config restored"; show; exit 0; }
+               echo "could not restore -- see: sudo ./tools/diagnose.sh" >&2; exit 1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        echo "unknown option: $1" >&2; exit 2 ;;
+    *)         ARM="$1"; shift ;;
   esac
-  [ -n "$code" ] && echo "    exit status: $code${why:+  ($why)}"
+done
+[ -n "$ARM" ] || { usage; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
+ARM_DIR="$GVPN_ARMS_DIR/$ARM"
+[ -f "$ARM_DIR/config.toml" ] || { echo "no arm '$ARM' -- run: sudo -E ./setup/02-make-arms.sh" >&2; exit 1; }
 
-  # Unfiltered. A grep here hides exactly the line that is unlike the others.
-  echo
-  echo "    --- journalctl -u gnosisvpn -n 30 ---"
-  journalctl -u gnosisvpn -n 30 --no-pager 2>/dev/null | sed 's/^/    /'
-  if [ -s /var/log/gnosisvpn/gnosisvpn.log ]; then
-    echo
-    echo "    --- /var/log/gnosisvpn/gnosisvpn.log (last 20) ---"
-    tail -20 /var/log/gnosisvpn/gnosisvpn.log | sed 's/^/    /'
-  fi
+# ----------------------------------------------------------------- install --
+say "installing arm: $ARM"
+sed 's/^/    /' "$ARM_DIR/README"
+if [ -f "$ARM_DIR/flags" ]; then
+  for f in $(cat "$ARM_DIR/flags"); do
+    systemctl show gnosisvpn -p ExecStart | grep -q -- "$f" \
+      || { echo "    this arm needs service flag $f -- run: sudo ./setup/00-vm-setup.sh --allow-insecure" >&2; exit 1; }
+  done
+fi
+[ -f "$ARM_DIR/PREREQUISITE" ] && { echo; echo "    PREREQUISITE:"; sed 's/^/      /' "$ARM_DIR/PREREQUISITE"; }
 
-  # For EX_NOINPUT, say which files are actually reachable rather than leaving
-  # the operator to guess which "input" was missing.
-  if [ "$code" = 66 ]; then
-    echo
-    echo "    --- files the service needs ---"
-    for f in "$CONFIG_PATH" /var/lib/gnosisvpn/.config; do
-      if [ -e "$f" ]; then
-        printf '    %s  %s\n' "$(stat -c '%A %U:%G' "$f")" "$f"
-      else
-        printf '    MISSING                %s\n' "$f"
-      fi
-    done
-    echo "    service user: $(systemctl show gnosisvpn -p User --value 2>/dev/null || echo root)"
-    echo
-    echo "    paths named inside the installed config.toml:"
-    grep -oE '"/[^"]+"' "$CONFIG_PATH" 2>/dev/null | tr -d '"' | sort -u | while read -r f; do
-      [ -e "$f" ] && printf '    ok       %s\n' "$f" || printf '    MISSING  %s\n' "$f"
-    done
-    echo "    (nothing listed = the config names no absolute paths)"
-  fi
+"$CTL" disconnect >/dev/null 2>&1 || true
+rm -f $LEGACY                                   # left by kits before the config.toml fix
+gvpn_install_arm "$ARM_DIR/config.toml"
+log_from=$(stat -c %s "$GVPN_SERVICE_LOG" 2>/dev/null || echo 0)
 
-  rollback
+if ! gvpn_service_restart; then
+  say "SERVICE DID NOT START with this arm"
+  gvpn_service_why | sed 's/^/    /'
+  echo "    --- service log since install ---"
+  tail -c +"$((log_from + 1))" "$GVPN_SERVICE_LOG" 2>/dev/null | tail -15 | sed 's/^/    /'
+  say "restoring the network config"
+  gvpn_restore_original && gvpn_service_restart \
+    && echo "    service is back up on the network config" \
+    || echo "    STILL DOWN -- run: sudo ./tools/diagnose.sh"
   exit 1
 fi
 echo "    service active"
-
-# systemd being happy is NOT the same as the config being accepted. A rejected
-# hopr-lib config does not fail the UNIT -- the worker starts, reads the file,
-# and parks in Warmup reporting the parse error in its status string. Checking
-# is-active alone passed here and left the node wedged for the five minutes the
-# route count then spent polling. So ask the client itself.
-say "verifying the client accepted the config"
-cfg_err=""
-for i in $(seq 1 12); do
-  st="$(timeout 10 "$CTL" status 2>&1 || true)"
-  case "$st" in
-    *"config error"*|*"unknown field"*|*"Output error"*|*"missing field"*)
-      cfg_err="$st"; break ;;
-    Ready*|Connected*|Idle*)
-      echo "    client reports: $(printf '%s' "$st" | head -1)"; cfg_err=""; break ;;
-  esac
-  sleep 5
-done
-
-if [ -n "$cfg_err" ]; then
-  say "THE CLIENT REJECTED THIS ARM'S CONFIG"
-  printf '%s\n' "$cfg_err" | sed 's/^/    /'
-  cat <<'EOF'
-
-    The unit is running; the worker is not. hopr-lib's config is
-    deny_unknown_fields, so a key it does not know stops it dead rather than
-    being ignored -- and "expected one of ..." in that message is the
-    authoritative list of what this BUILD accepts, which may differ from any
-    branch of the source.
-
-EOF
-  rollback
-  exit 1
-fi
-
-[ "$DO_COUNT" = 1 ] || { show; exit 0; }
+[ "$COUNT" = 1 ] || { show; exit 0; }
 
 # ------------------------------------------------------------------- count --
+# One route vs many is the check that a pin actually took. It needs planner
+# DEBUG logging (00-vm-setup.sh) and traffic flowing, or there is nothing to see.
+say "counting routes for '$ARM' via $DEST  (~$((SETTLE / 60 + 3)) min, one line per state change)"
+grep -qE "^\[destinations\.\"?$DEST\"?\]" "$GVPN_CONFIG_PATH" \
+  || { echo "    '$DEST' is not a destination in this config" >&2; exit 1; }
 
-say "counting distinct routes for arm '$ARM' (destination $DEST)"
+wait_state() {  # wait_state TIMEOUT PATTERN ACTION...
+  local t="$1" pat="$2" last="" st; shift 2
+  "$@" >/dev/null 2>&1 || true
+  for i in $(seq 1 $((t / 3))); do
+    st="$(ctl_status)"
+    [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' $((i * 3)) "${st:-<no answer>}"; last="$st"; }
+    echo "$st" | grep -qE "$pat" && return 0
+    sleep 3
+  done
+  echo "    gave up after ${t}s (last: ${last:-<none>})" >&2; return 1
+}
+log_from=$(stat -c %s "$GVPN_SERVICE_LOG" 2>/dev/null || echo 0)
+wait_state "$READY_TIMEOUT"   '^(Ready|Connected)' "$CTL" start-client 60m || exit 1
+wait_state "$CONNECT_TIMEOUT" "^Connected to $DEST" "$CTL" connect "$DEST" || exit 1
 
-if ! grep -q 'planner=debug' /etc/systemd/system/gnosisvpn.service.d/*.conf 2>/dev/null; then
-  echo "    WARNING: planner DEBUG logging not found in the drop-ins."
-  echo "    Without it there are no candidate-path lines to count."
-  echo "    00-vm-setup.sh installs it as 10-bench-logging.conf."
-fi
+echo "    connected; pulling traffic for ${SETTLE}s"
+url="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
+curl -s -o /dev/null --max-time "$SETTLE" "${url//\{bytes\}/2000000000}" || true
+"$CTL" disconnect >/dev/null 2>&1 || true
 
-cat <<EOF
-    This takes a few minutes and most of it is waiting. Expect:
-      up to ${READY_TIMEOUT}s   node reaching Ready (channels, SURB warm-up)
-      up to ${CONNECT_TIMEOUT}s   session establishing to $DEST
-             ${SETTLE}s   traffic running so the planner actually draws paths
-    Each line below is one poll, so silence means something is wrong.
+read -r lines paths cands < <(python3 "$GVPN_KIT/lib/routes.py" "$GVPN_SERVICE_LOG" \
+    --from-byte "$log_from" | sed 's/[a-z]*=//g')
 
-EOF
-
-# A wedged service socket makes ctl block forever. Cap every call: a status
-# command that does not answer in 10s IS the diagnosis, not something to wait out.
-ctl_status() { timeout 10 "$CTL" -o plain status 2>/dev/null; }
-
-# Destinations are named in config.toml. Asking for one that is not there fails
-# in a way that looks exactly like a slow connect, for three silent minutes.
-if ! grep -qE "^\[destinations\.\"?${DEST}\"?\]" "$CONFIG_PATH" 2>/dev/null; then
-  echo "    '$DEST' is not a destination in $CONFIG_PATH. Available:"
-  grep -E '^\[destinations\.' "$CONFIG_PATH" 2>/dev/null | sed 's/^/      /'
-  echo "    Set GVPN_DESTINATION in gvpn.conf, or pass --dest."
+if [ "${lines:-0}" -eq 0 ]; then
+  say "NO RESULT: the planner logged no candidate paths"
+  echo "    Not the same as 1 route -- nothing was counted. Planner DEBUG is off:"
+  echo "    sudo ./setup/00-vm-setup.sh --network <net>   then re-run this"
   exit 1
 fi
-
-: > "$LOG" 2>/dev/null || truncate -s 0 "$LOG"
-
-# Start from a known state. A session left up by a previous --count means the
-# node reports "Connected ..." and never "Ready", and the gate below would call
-# a perfectly healthy node broken.
-"$CTL" disconnect >/dev/null 2>&1 || true
-sleep 2
-
-"$CTL" start-client 60m >/dev/null 2>&1 || true
-last=""
-for i in $(seq 1 $((READY_TIMEOUT / 3))); do
-  st="$(ctl_status | head -1)"
-  [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' "$((i * 3))" "${st:-<no answer from the service>}"; last="$st"; }
-  # Connected also satisfies this gate: the node is past Ready, not short of it.
-  case "$st" in Ready*|Connected*) break ;; esac
-  sleep 3
-done
-case "$last" in
-  Ready*|Connected*) ;;
-  *) cat <<EOF
-
-    NEVER REACHED Ready (last state: ${last:-<none>}).
-    That is a node problem, not a benchmark one. Look at:
-      gnosis_vpn-ctl info
-      sudo journalctl -u gnosisvpn -n 50 --no-pager
-    A node with no open channels, or one whose manual hopr config was rejected,
-    sits here forever.
-EOF
-     exit 1 ;;
-esac
-
-"$CTL" connect "$DEST" >/dev/null 2>&1
-last=""
-for i in $(seq 1 $((CONNECT_TIMEOUT / 3))); do
-  st="$(ctl_status | grep -E '^(Connected|Waiting|Connecting|Ready)' | head -1 || true)"
-  [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' "$((i * 3))" "${st:-<no answer>}"; last="$st"; }
-  case "$st" in "Connected to $DEST"*) break ;; esac
-  sleep 3
-done
-case "$last" in
-  "Connected to $DEST"*) ;;
-  *) echo; echo "    NEVER CONNECTED to $DEST (last state: ${last:-<none>})"
-     echo "    sudo journalctl -u gnosisvpn -n 50 --no-pager"
-     exit 1 ;;
-esac
-
-echo "    connected; running traffic for ${SETTLE}s"
-# Something has to be moving for the planner to draw paths at all -- an idle
-# tunnel produces almost no candidate lines.
-TRAFFIC_URL="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
-TRAFFIC_URL="${TRAFFIC_URL//\{bytes\}/200000000}"
-( curl -s -o /dev/null --max-time "$SETTLE" "$TRAFFIC_URL" || true ) &
-sleep "$SETTLE"
-wait 2>/dev/null || true
-
-# `|| true` on both, and on the listing below. Under `set -euo pipefail` a grep
-# that matches nothing fails, pipefail propagates it, and set -e kills the script
-# -- silently, at exactly the moment it has something important to report. "No
-# candidate lines" is the single most useful thing this script can tell you, so
-# it must not be the one case that cannot reach the screen.
-LINES=$(grep -c 'candidate path' "$LOG" 2>/dev/null || true); LINES=${LINES:-0}
-COUNT=$(grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | wc -l || true); COUNT=${COUNT:-0}
-
-if [ "$LINES" -eq 0 ]; then
-  say "NO RESULT: the log has no 'candidate path' lines at all"
-  cat <<EOF
-    $LOG
-
-    This is NOT "one route". It means nothing was counted, because the planner
-    is not logging at DEBUG. A count of 0 and a genuine pin of 1 look alike to
-    anyone skimming, which is why this refuses to report a number.
-
-    Check the logging drop-in, then re-run:
-      grep -r planner /etc/systemd/system/gnosisvpn.service.d/
-      sudo systemctl show gnosisvpn -p Environment | tr ' ' '\n' | grep RUST_LOG
-    00-vm-setup.sh installs it as 10-bench-logging.conf.
-EOF
-  "$CTL" disconnect >/dev/null 2>&1 || true
-  exit 1
-fi
-
-say "RESULT: arm '$ARM' drew from $COUNT distinct route(s)  ($LINES candidate lines)"
-grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | head -20 | sed 's/^/    /' || true
-
-cat <<EOF
-
-    Expected: pin-planner = 1, auto = many (typically 5-20).
-    Both many  -> the manual hopr config is not being read; check the drop-in at
-                  /etc/systemd/system/gnosisvpn.service.d/30-arm.conf
-    Both 1     -> the graph offers only one path; check the open channel count.
-EOF
-
-"$CTL" disconnect >/dev/null 2>&1 || true
+routes=$(( paths > cands ? paths : cands ))     # same definition as gvpn-analyze.py
+say "RESULT: '$ARM' routes=$routes   (distinct paths=$paths, max candidates=$cands, $lines lines)"
+[ "$paths" = "$cands" ] || echo "    the two measures disagree -- read lib/routes.py before trusting either"
+echo "    expected: pin-planner = 1, auto = many. Both many => the override is not applied."

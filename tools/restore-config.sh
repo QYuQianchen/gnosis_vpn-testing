@@ -1,90 +1,102 @@
 #!/usr/bin/env bash
 #
-# restore-config.sh -- undo the damage from writing through the config symlink.
+# restore-config.sh -- put the packaged network config back, and the service up.
 #
-#   sudo ./tools/restore-config.sh          show what is wrong
-#   sudo ./tools/restore-config.sh --apply  put the packaged config back
+#   sudo ./tools/restore-config.sh          inspect; changes nothing
+#   sudo ./tools/restore-config.sh --apply  repair
 #
-# THE BUG THIS CLEANS UP
+# Repairs a node damaged by kits before the config.toml fix, which wrote arm
+# configs THROUGH the config.toml symlink into the packaged network config
+# (config-<net>.toml). That file then declared [connection.path_planner] twice,
+# the client rejected it with exit 66, and the "backups" those kits made were
+# symlinks to the same damaged file.
 #
-#   /etc/gnosisvpn/config.toml is a SYMLINK selecting a network config
-#   (-> config-jura-prod.toml). Earlier versions of use-arm.sh and gvpn-bench.sh
-#   ran `cp ARM config.toml`, which follows the link and overwrites the PACKAGED
-#   network config -- the only copy on the box. Their `cp -a` "backup" copied
-#   the link rather than its contents, so rollback restored nothing.
-#
-#   Symptom: config-jura-prod.toml has a recent mtime and contains arm settings,
-#   and config.toml.use-arm-backup / config.toml.backup.* are all symlinks to it.
-#
+# --apply moves the damaged file aside (kept, for evidence), reinstalls it from
+# the package, re-points config.toml, and restarts the service. The node
+# identity in /var/lib/gnosisvpn is never touched.
 set -uo pipefail
+. "$(cd "$(dirname "$0")/.." && pwd)/lib/common.sh"
 
-CONFIG_DIR="${GNOSISVPN_CONFIG_DIR:-/etc/gnosisvpn}"
-CONFIG_PATH="$CONFIG_DIR/config.toml"
 NET="${GVPN_NETWORK:-jura-prod}"
+NETCONF="$GVPN_CONFIG_DIR/config-$NET.toml"
 APPLY=0
-[ "${1:-}" = "--apply" ] && APPLY=1
-case "${1:-}" in -h|--help) sed -n '2,20p' "$0"; exit 0 ;; esac
-
+case "${1:-}" in
+  --apply)   APPLY=1 ;;
+  -h|--help) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "")        ;;
+  *)         echo "unknown option: $1" >&2; exit 2 ;;
+esac
+[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
-say "current state"
-ls -la "$CONFIG_DIR" | sed 's/^/    /'
+PKG="$(dpkg -S "$NETCONF" 2>/dev/null | cut -d: -f1 | head -1)"
+modified() { [ -n "$PKG" ] && dpkg --verify "$PKG" 2>/dev/null | grep -q " $NETCONF\$"; }
 
-TARGET="$(readlink -f "$CONFIG_PATH" 2>/dev/null || echo "$CONFIG_PATH")"
-echo
-echo "    config.toml resolves to: $TARGET"
-if grep -q 'connection.path_planner' "$TARGET" 2>/dev/null; then
-  echo "    >>> it contains [connection.path_planner] -- an ARM config, written"
-  echo "        over the packaged one."
+say "inspecting"
+echo "    network:     $NET"
+echo "    config.toml: -> $(readlink -f "$GVPN_CONFIG_PATH" 2>/dev/null || echo '<missing>')"
+echo "    package:     ${PKG:-<no package owns $NETCONF>}"
+damaged=0
+if [ ! -f "$NETCONF" ]; then
+  echo "    $NETCONF is MISSING"; damaged=1
+elif ! gvpn_config_check "$NETCONF" 2>/dev/null; then
+  echo "    $NETCONF does NOT PARSE:"
+  python3 "$GVPN_KIT/lib/tomlmerge.py" check "$NETCONF" 2>&1 | sed 's/^/      /'
+  damaged=1
+elif modified; then
+  echo "    $NETCONF parses, but differs from the package (dpkg --verify)"; damaged=1
 else
-  echo "    no arm planner section in it."
+  echo "    $NETCONF is pristine"
 fi
-
-# Say plainly which "backups" cannot restore anything, rather than letting
-# someone restore from one and believe they are fixed.
-echo
-for b in "$CONFIG_DIR"/config.toml.*backup*; do
-  [ -e "$b" ] || continue
-  if [ -L "$b" ]; then
-    echo "    USELESS (a link, not a copy): $b -> $(readlink "$b")"
-  else
-    echo "    real copy: $b"
-  fi
+for b in "$GVPN_CONFIG_DIR"/config.toml.*backup*; do
+  [ -L "$b" ] && echo "    useless backup (a symlink, not a copy): $(basename "$b")"
 done
+echo "    service:     $(systemctl is-active gnosisvpn)  $(gvpn_service_why | head -1)"
 
 if [ "$APPLY" = 0 ]; then
   echo
-  echo "Nothing changed. To repair, re-run with --apply. It will:"
-  echo "  1. reinstall the packaged config from apt (the only pristine source)"
-  echo "  2. point config.toml back at config-$NET.toml"
-  echo "  3. delete the symlink 'backups', which cannot restore anything"
-  echo
-  echo "    sudo $0 --apply"
+  [ "$damaged" = 1 ] && echo "Repair with:  sudo $0 --apply" || echo "Nothing to repair in the config."
   exit 0
 fi
 
-say "reinstalling the packaged configs"
-PKG="$(dpkg -S "$CONFIG_DIR/config-$NET.toml" 2>/dev/null | cut -d: -f1 | head -1)"
-if [ -n "$PKG" ]; then
-  echo "    owning package: $PKG"
-  apt-get install -y -qq --reinstall -o Dpkg::Options::="--force-confmiss" "$PKG" \
-    || { echo "    reinstall failed -- run setup/00-vm-setup.sh instead" >&2; exit 1; }
-else
-  echo "    no package owns $CONFIG_DIR/config-$NET.toml" >&2
-  echo "    re-run: sudo ./setup/00-vm-setup.sh --network $NET --allow-insecure" >&2
-  exit 1
+# ------------------------------------------------------------------ repair --
+systemctl stop gnosisvpn 2>/dev/null || true
+
+if [ "$damaged" = 1 ]; then
+  [ -n "$PKG" ] || { echo "no package owns $NETCONF -- reinstall with the upstream installer:" >&2
+                     echo "  curl -fsSL https://download.gnosisvpn.io/linux/install.sh | sudo bash -s -- --network=$NET" >&2
+                     exit 1; }
+  say "reinstalling $NETCONF from $PKG"
+  aside=""
+  if [ -f "$NETCONF" ]; then
+    aside="$NETCONF.damaged-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$NETCONF" "$aside" && echo "    damaged copy kept as $(basename "$aside")"
+  fi
+  # --force-confmiss restores a conffile only when it is MISSING -- dpkg keeps
+  # a modified one on purpose -- which is why it was moved aside first.
+  if ! apt-get install -y -qq --reinstall --allow-change-held-packages \
+         -o Dpkg::Options::=--force-confmiss "$PKG"; then
+    [ -n "$aside" ] && mv "$aside" "$NETCONF"          # no worse than before
+    echo "    reinstall failed (is this exact version still in the repo?). Use the installer:" >&2
+    echo "      curl -fsSL https://download.gnosisvpn.io/linux/install.sh | sudo bash -s -- --network=$NET" >&2
+    exit 1
+  fi
+  gvpn_config_check "$NETCONF" || { echo "    reinstalled file still does not parse" >&2; exit 1; }
+  modified && echo "    WARNING: still differs from the package" || echo "    pristine again"
 fi
 
 say "pointing config.toml at the network config"
-ln -sfn "$CONFIG_DIR/config-$NET.toml" "$CONFIG_PATH"
-ls -la "$CONFIG_PATH" | sed 's/^/    /'
-
-say "removing the symlink backups"
-for b in "$CONFIG_DIR"/config.toml.*backup*; do
-  [ -L "$b" ] || continue
-  rm -f "$b" && echo "    removed $b"
+ln -sfn "$NETCONF" "$GVPN_CONFIG_PATH"
+rm -f "$GVPN_CONFIG_ORIG" "$GVPN_ARM_CONFIG"
+for b in "$GVPN_CONFIG_DIR"/config.toml.*backup*; do
+  [ -L "$b" ] && rm -f "$b" && echo "    removed symlink backup $(basename "$b")"
 done
-rm -f "$CONFIG_DIR/.gvpn-config-original"
 
-say "done"
-echo "    sudo systemctl start gnosisvpn && systemctl is-active gnosisvpn"
+say "starting the service"
+if gvpn_service_restart; then
+  echo "    active. Next: sudo -E ./setup/02-make-arms.sh"
+else
+  echo "    still not starting: $(gvpn_service_why | head -1)" >&2
+  echo "    sudo ./tools/diagnose.sh" >&2
+  exit 1
+fi

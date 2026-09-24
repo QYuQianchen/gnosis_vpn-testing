@@ -1,4 +1,5 @@
-
+# One outgoing channel, to @RELAY@. The allowlist stops the strategy reopening
+# the channels you close; it closes nothing itself. See PREREQUISITE.
 [strategy]
 min_open_channels    = 1
 target_open_channels = 1

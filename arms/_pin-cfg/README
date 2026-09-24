@@ -1,32 +1,4 @@
-FORWARD LEG ONLY, VIA CHANNEL ALLOWLIST. The forward path is built from your own
-outgoing channels, so leaving exactly one open -- to @RELAY@ -- gives it one
-candidate. The RETURN leg is untouched and still drawn weighted-random, which is
-the point: against pin-planner this isolates return-leg striping on its own.
-
-PREREQUISITE, DONE BY HAND, ONCE PER RELAY.
-
-The allowlist governs which peers the strategy OPENS channels to. It does not
-close the ones you already have, and neither does the strategy -- edgli opens and
-tops up, it never closes. So before this arm means anything you have to close
-your other outgoing channels yourself.
-
-That is an on-chain operation on your Safe, not something this client can do:
-gnosis_vpn-ctl has no channel commands at all. Use the Safe that owns the
-channels (HoprChannels on Gnosis Chain). Closing returns the stake to the Safe --
-you pay gas and wait out the closure period, you do not lose the funding, and you
-do NOT need a new identity or a faucet code.
-
-Order matters. Set the allowlist first, then close: with the allowlist already in
-place the strategy will not reopen the ones you just closed.
-
-VERIFY BEFORE TRUSTING IT:
-
-  sudo ./bench/use-arm.sh <this arm> --count     # must report 1 route
-
-A count above 1 means a channel you meant to close is still open, or the closure
-period has not elapsed.
-
-RUN IT AS ITS OWN STUDY. Not because of identity -- that was wrong -- but because
-the channel set is a property of the NODE, not of the arm. While you are down to
-one channel, 'auto' is not auto. Restore the channel set, re-baseline, then
-compare.
+FORWARD LEG PINNED BY TOPOLOGY. The node keeps one outgoing channel, to @RELAY@,
+so every forward path goes through it; the return leg is still drawn freely.
+Read it only against its partner pin-cfg-pinned-@RELAY@ -- the gap is the return leg.
+Channels are node-global: run the pair as their own study, never with auto.

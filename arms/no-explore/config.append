@@ -1,6 +1,3 @@
-
-# ONE VARIABLE: the 10% of return-path draws made uniformly at random rather
-# than by weight. If the floors come from those blind draws alone, this arm
-# removes them without touching candidate diversity.
+# auto minus the random return draws, nothing else. See README.
 [connection.path_planner]
 return_path_exploration = 0.0

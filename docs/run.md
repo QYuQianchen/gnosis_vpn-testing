@@ -1,181 +1,191 @@
-# Configure and run
+# Run it, step by step
 
-## What you provide
+`[Mac]` = your laptop, in your clone of the kit. `[VM]` = `ssh gvpn-vm`, in `~/gvpn-8408`.
 
-One field you type. One you set with a flag. One the kit measures.
+> **Node down right now with exit 66?** Jump to [Repair](#repair-a-node-that-will-not-start).
 
-```sh
-gnosis_vpn-ctl destinations      # on the VM — what your exits are called
-```
+---
 
-```sh
-# gvpn.conf — machine defaults, edited once
-GVPN_DESTINATION=UK              # ← the only value you type, if yours differs
-```
+## 0 · Before you start — once
 
-Everything else in `gvpn.conf` has a working default: channel `stable`, network
-`jura-prod`, Cloudflare as the load source (no second VPS needed), 200M×20 log
-rotation. Leave `GVPN_PIN_VERSION` empty here — it belongs per-study.
-
-```sh
-# studies/2026-09-24-transfers-25mb.conf — ships ready, ~3 h
-GVPN_PROFILE=transfers           # 30 cycles, 25 MB each way, 1 transfer/session
-GVPN_ARMS="auto pin-planner"
-GVPN_DESTINATIONS="UK"           # same name as above
-
-GVPN_PIN_VERSION=                # ← --pin-current fills it
-GVPN_FLOOR_MBPS=                 # ← preflight measures it
-```
-
-Leave the last two empty. Preflight writes both back to the file, so the study
-records what actually ran; commit it afterwards.
-
-**These two are the ones that produce a plausible-but-meaningless result rather
-than failing.** An unpinned version means each arm installs whatever is newest
-when it runs, and you compare versions instead of routing modes — with tables
-that look entirely normal. A floor threshold chosen after seeing the pinned arm
-makes the headline number whatever you wanted. Neither is yours to type.
-
-No faucet codes are needed; no shipped arm re-onboards.
-
-## Deploy
-
-```sh
-# Mac
-make push
-```
-
-`make push` is refused while a run is in progress — a deploy rewrites scripts in
-place and bash reads a script as it executes.
-
-## Prepare the node — once
-
-```sh
-ssh gvpn-vm && cd ~/gvpn-8408
-
-# 1. the VM itself: client, policy route, planner DEBUG logging, log rotation
-sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
-
-# 2. ONBOARD. The service being active is not the same as the client running:
-#    systemd starts the daemon, this starts the client, and until it reaches
-#    Ready the node has no identity, no channels and no destinations.
-#    The daemon must be up FIRST -- start-client talks to it over a socket and
-#    answers "service not running" if it is not:
-systemctl is-active gnosisvpn || sudo journalctl -u gnosisvpn -n 20 --no-pager
-gnosis_vpn-ctl start-client 60m
-watch -n5 gnosis_vpn-ctl status        # wait for Ready before anything else
-
-# 3. back up the funded identity, now that there is one
-make backup
-
-# 4. render the arms — needs the node's own addresses, so it must come after (2)
-sudo -E ./setup/02-make-arms.sh
-```
-
-Step 2 is the one people skip, because `systemctl is-active gnosisvpn` looks
-like success. It is not: onboarding is what creates the identity the rest of
-the kit depends on, and step 4 reads addresses that do not exist until it has
-finished.
-
-## Run
-
-```sh
-# a. pin the version, rehearse the study end to end        ~10 min
-sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb \
-     --pin-current --trial-only
-
-# b. calibrate the floor, launch detached                  ~25 min, then ~3 h
-sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --launch -y
-
-# c. read it
-make status
-make report
-make publish STUDY=2026-09-24-transfers-25mb
-```
-
-After (b) you can close the laptop. `results/<study>/report.md` is what goes
-into the issue.
-
-### What preflight checks
-
-Each stage gates the next; it exits non-zero at the first hard failure, so
-`--launch` cannot fire after a failed check.
-
-| Stage | Time | Catches |
-|---|---|---|
-| **A** static | seconds | unrendered arms, placeholders, service down, version not pinned, `zero-hop` without `--allow-insecure`, planner DEBUG off, policy route missing, run already in progress, a `pin-cfg-*` arm in a normal study |
-| **B** route gate | ~3 min/arm | an arm whose config the client rejects. Asserts `pin-planner` = 1 route and the baseline > 1 |
-| **C** trial | ~1 min/arm | data actually moving, every arm producing a session, the report rendering |
-| **D** calibrate | ~25 min | runs the **baseline alone**, writes its p25 into the study as `GVPN_FLOOR_MBPS` |
-| **E** launch | — | detached, survives your SSH closing |
-
-`--trial` is the study *shrunk* — same arms, same exits, same load source, 1
-cycle × 5 MB. Not a smaller profile, which would exercise a different
-configuration and pass while the real run fails on its first cycle. A trial's
-manifest records `trial: true` and the analyzer refuses to score it.
-
-## Verify by hand
-
-Two things preflight cannot do for you.
-
-```sh
-# the load endpoints, tunnel up — both must print 200
-curl -s -o /dev/null -w '%{http_code}\n' \
-     "https://speed.cloudflare.com/__down?bytes=1000000"
-head -c 1000000 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' \
-     --data-binary @- "https://speed.cloudflare.com/__up"
-
-# SSH survives a tunnel connect — preflight checks the route exists, not that it works
-ip rule show | grep 200 && ip route show table 200    # BOTH non-empty
-gnosis_vpn-ctl connect UK
-#   from a third machine:  ssh <user>@<VM IP> 'echo still-here'
-gnosis_vpn-ctl disconnect
-```
-
-A rule pointing at an empty table is the worst state: it looks configured and
-protects nothing. Keep the Contabo console reachable.
-
-## When it fails
-
-```sh
-sudo ./tools/diagnose.sh        # or: make diagnose
-```
-
-One read-only report: exit status decoded, the unit and every drop-in, the env
-files, the config and its tables, every absolute path they name marked present
-or missing, the identity directory, and the binary's own output unfiltered.
-Addresses and keys are redacted, so it is safe to paste. Start here rather than
-with a single `journalctl` — these facts are useless one at a time.
-
-
-| Symptom | What it is |
+| You need | |
 |---|---|
-| `the study sets no GVPN_PIN_VERSION` | add `--pin-current`, or pick one with `05-set-version.sh --list` |
-| `THE CLIENT REJECTED THIS ARM'S CONFIG` | a key this build does not know. The error's "expected one of …" is the authoritative list for *this binary*. `use-arm.sh` has already rolled back |
-| `auto drew 1 route` | the node holds one channel — the baseline has no diversity to lose, so every comparison is void |
-| `pin-planner drew N routes` | the `[connection.path_planner]` override is not being applied; check the arm's `config.toml` |
-| `SERVICE DID NOT START`, exit **66** | `EX_NOINPUT` — a file it needs could not be *opened*. The config was never read, so this is not a bad key. Check `systemctl cat gnosisvpn` for a drop-in naming a file that no longer exists, and `ls -l /etc/gnosisvpn/`. Repair with `sudo ./setup/00-vm-setup.sh --network <net>`, which rewrites the unit, the drop-ins and the config |
-| `ctl` says `service not running` | the daemon is down, so nothing the client can do will help. Fix the daemon first — this is never solved by re-running a `ctl` command |
-| `SERVICE DID NOT START`, exit **78** | `EX_CONFIG` — the config *was* read and rejected. That is a bad key |
-| `NO RESULT: no 'candidate path' lines` | planner DEBUG is off. Not "one route" — nothing was counted |
-| `a run is already in progress` | `make status`; clear the lock only if stale |
-| `unsubstituted placeholders` | the node had not onboarded when `make arms` ran |
-| report says `THE PIN DID NOT TAKE` | the run compared `auto` with itself. Discard it |
-| report says `TRIAL RUN` | you are reading a rehearsal |
+| A VM | Ubuntu, ≥ 4 vCPU, ≥ 8 GB RAM, ≥ 40 GB disk (DEBUG logging is hungry) |
+| Console access | the provider's VNC — a full-tunnel VPN can take your SSH with it |
+| An SSH alias | `gvpn-vm` in `~/.ssh/config` on your Mac |
 
-## New kit version
-
-```sh
-# Mac
-make status                                  # nothing running on the VM
-tar xzf gvpn-8408-kit.tar.gz --strip-components=1 -C <your clone>
-make test && git add -A && git commit -m "kit: <what changed>" && make push
-
-# VM — only if an arm template or the hook changed
-sudo -E ./setup/02-make-arms.sh
-./setup/06-git-deploy.sh          # not as root
+```
+# ~/.ssh/config on your Mac
+Host gvpn-vm
+    HostName  <VM public IP>
+    User      deploy
 ```
 
-Read `CHANGELOG.md` first: a change
-that moves a number means a study spanning it must be restarted, which is why
-every run records `kit_rev`.
+**The one value you may need to type:** your exit's name. On the VM,
+`gnosis_vpn-ctl destinations` lists them; if yours is not `UK`, set
+`GVPN_DESTINATION` in `gvpn.conf`. Everything else there has a working default.
+
+## 1 · Deploy the kit
+
+```sh
+[VM]  ./setup/06-git-deploy.sh             # once: makes the VM a push target (not as root)
+[Mac] git remote add vm gvpn-vm:gvpn-8408  # once
+[Mac] make hooks                           # once per clone: pre-commit secret scan
+[Mac] make push                            # every time the kit changes
+```
+
+A push is refused while a run is in progress — a deploy rewrites scripts as they
+execute.
+
+## 2 · Prepare the node — once
+
+```sh
+[VM] sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
+```
+
+Installs the client, the SSH-bypass policy route, planner DEBUG logging and log
+rotation, then starts the service. It checks the config first and stops with a
+reason if it will not load.
+
+```sh
+[VM] gnosis_vpn-ctl start-client 60m
+[VM] watch -n5 gnosis_vpn-ctl status       # wait for Ready -- this is onboarding
+[VM] make backup                           # encrypt the funded identity; keep the passphrase
+```
+
+`systemctl is-active` is not enough: the daemon being up is not the client being
+onboarded. Until `Ready`, there is no identity, no channels, no destinations.
+
+**Check your SSH survives a tunnel** — preflight can check the route exists, not
+that it works:
+
+```sh
+[VM]  gnosis_vpn-ctl connect UK
+[Mac] ssh gvpn-vm 'echo still-here'        # from a SECOND terminal
+[VM]  gnosis_vpn-ctl disconnect
+```
+
+## 3 · Render the arms and prove the pin
+
+```sh
+[VM] make arms                             # sudo -E ./setup/02-make-arms.sh
+[VM] make count ARM=auto                   # must read MANY routes
+[VM] make count ARM=pin-planner            # must read 1
+```
+
+`make arms` merges each arm's settings into the node's network config and
+refuses to write anything that does not parse. `make count` installs the arm,
+connects, pulls traffic for 90 s and counts the routes the planner used; if the
+service will not start with that arm, it puts the network config back.
+
+**Do not go further until `auto` reads many and `pin-planner` reads 1.** If both
+read many, the pin is not taking effect and every later number is about nothing.
+
+## 4 · Run a study
+
+A study is one file in `studies/`. The one that ships — `2026-09-24-transfers-25mb`
+— is 2 arms × 1 exit × 30 cycles of 25 MB, about 3 hours. Two fields in it are
+filled in for you by the next commands; leave them empty.
+
+```sh
+[VM] sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --pin-current --trial-only
+```
+
+`--pin-current` records the installed version in the study file, so a mid-study
+client upgrade cannot silently turn the comparison into one between versions.
+`--trial-only` runs the whole study at 1 cycle × 5 MB and stops — same arms,
+same exits. A trial's report says `TRIAL RUN` and cannot be quoted.
+
+```sh
+[VM] make launch STUDY=2026-09-24-transfers-25mb
+```
+
+Re-checks everything, calibrates the floor threshold from `auto` alone (so the
+pinned arm cannot influence the bar it is judged against), writes it into the
+study file, then starts the run detached. You can log off.
+
+```sh
+[VM] make status                           # still running?
+```
+
+At the end the node is put back on its network config automatically.
+
+## 5 · Read and keep the result
+
+```sh
+[VM]  make report
+[VM]  make publish STUDY=2026-09-24-transfers-25mb
+[Mac] scp -r gvpn-vm:gvpn-8408/results/2026-09-24-transfers-25mb results/
+[Mac] scp gvpn-vm:gvpn-8408/studies/2026-09-24-transfers-25mb.conf studies/
+[Mac] git add results/ studies/ && git commit -m "results: …" && make push
+```
+
+`scp`, not `git pull`: `publish` leaves the report as untracked files on the VM,
+and the study file there now carries the pinned version and floor that preflight
+wrote. Copy it back **before your next push** — a push rewrites tracked files on
+the VM and would overwrite those values. (Each run's `manifest.json` records them
+too, so a run is never unidentifiable.)
+
+`results/<study>/report.md` is what goes into #8408. Before quoting it:
+
+- **`distinct routes` must be 1 for `pin-planner`.** If not, the report voids itself.
+- **Bracketed ranges are 90 % confidence intervals.** One that spans zero means
+  the arms are indistinguishable at that sample size.
+- **The headline is the floor rate and the slow 10 %**, not the median.
+
+For other shapes of study — more arms, more exits, the channel-trim pair — see
+`docs/studies.md`.
+
+---
+
+## Repair a node that will not start
+
+```sh
+[VM] sudo ./tools/diagnose.sh              # read-only; safe to paste
+```
+
+The first section decodes the exit status. **Exit 66 means the config failed to
+read *or parse*** — `gnosis_vpn-root` maps every config error to 66, including a
+bad or duplicated key. The binary's own reason is in
+`/var/log/gnosisvpn/gnosisvpn.log`, not in `journalctl`; diagnose shows it.
+
+If the network config itself is damaged (diagnose says it does not parse, or
+differs from the package):
+
+```sh
+[VM] sudo ./tools/restore-config.sh             # inspect
+[VM] sudo ./tools/restore-config.sh --apply     # repair
+[VM] sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
+[VM] make arms
+```
+
+`--apply` keeps the damaged file as `config-<net>.toml.damaged-<time>`,
+reinstalls the packaged one, re-points `config.toml` and restarts the service.
+Your identity in `/var/lib/gnosisvpn` is never touched.
+
+To put the network config back after an arm, without repairing anything:
+`sudo ./bench/use-arm.sh --restore`.
+
+| Symptom | Meaning |
+|---|---|
+| exit **66** | config failed to read or parse — see above |
+| exit **75** | another instance holds the daemon lock |
+| `start request repeated too quickly` | systemd gave up after 5 failures; the kit's scripts clear this themselves (`systemctl reset-failed gnosisvpn`) |
+| `service not running` from `gnosis_vpn-ctl` | the daemon is down; no `ctl` command can fix that — repair the daemon first |
+| `NO RESULT: the planner logged no candidate paths` | planner DEBUG is not active; re-run `00-vm-setup.sh`. Not the same as 1 route |
+| `auto` reads 1 route | the node holds one channel — the baseline has no diversity to lose, every comparison is void |
+| `pin-planner` reads many | the override is not applied — `sudo ./bench/use-arm.sh --show` |
+| push rejected, "not owned by deploy" | `./tools/fix-worktree-ownership.sh --apply` on the VM |
+| report says `THE PIN DID NOT TAKE` | the run compared `auto` with itself; discard it |
+
+## New version of the kit
+
+```sh
+[Mac] ssh gvpn-vm 'cd gvpn-8408 && make status'   # nothing may be running
+[Mac] tar xzf gvpn-8408-kit.tar.gz --strip-components=1 -C <your clone>
+[Mac] make test && git add -A && git commit -m "kit: …" && make push
+[VM]  make arms                            # arms are rendered by the kit, so re-render
+```
+
+Read `CHANGELOG.md` first: a change that can move a number means a study that
+spans it must be restarted. Every run records `kit_rev` for that reason.

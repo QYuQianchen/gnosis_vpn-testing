@@ -77,9 +77,7 @@ Defaults come from gvpn.conf; flags override it. Current config: ${CONFIG_LOADED
   channel=$CHANNEL network=$NETWORK pin=${PIN_VERSION:-<newest in channel>}
   allow_insecure=$ENABLE_INSECURE allow_experimental=$ENABLE_EXPERIMENTAL
 
-After this script, run:
-  ./01-iperf-server.sh        # on the OTHER VPS, not this one
-  ./02-make-arms.sh --help    # build the arm configs
+Next: docs/run.md, step 3 (onboard, back up, render the arms).
 EOF
 }
 
@@ -293,19 +291,22 @@ fi
 
 # ------------------------------------------------------------- 5. drop-ins --
 #
-# RUST_LOG goes in a drop-in rather than /etc/gnosisvpn/gnosisvpn.env, because the
-# packaged env file is owned by apt and would be replaced on upgrade. A drop-in's
-# Environment= is applied after the unit's EnvironmentFile=, so it wins.
+# Planner DEBUG logging, which route counting depends on. It must go in an
+# EnvironmentFile=, not Environment=: systemd applies EnvironmentFile= AFTER
+# Environment=, so the packaged gnosisvpn.env's RUST_LOG=info would silently
+# win. A drop-in's EnvironmentFile= is appended to the unit's list and read
+# last, so it is the one that sticks.
 
 say "systemd drop-ins"
-mkdir -p /etc/systemd/system/gnosisvpn.service.d
-
-cat > /etc/systemd/system/gnosisvpn.service.d/10-bench-logging.conf <<'EOF'
+DROPIN_DIR=/etc/systemd/system/gnosisvpn.service.d
+mkdir -p "$DROPIN_DIR"
+cat > "$DROPIN_DIR/bench.env" <<'EOF'
+# gvpn-8408: planner DEBUG for route counting (lib/routes.py). Nothing else.
+RUST_LOG=info,hopr_transport::path::planner=debug,hopr_transport::path::selector=debug
+EOF
+cat > "$DROPIN_DIR/10-bench-logging.conf" <<EOF
 [Service]
-# Path attribution. These two targets emit the "weighted candidate path" and
-# "[forward]/[return] candidate path" lines the analysis counts distinct relays
-# from. Only these two -- full DEBUG buries them.
-Environment=RUST_LOG=info,hopr_transport::path::planner=debug,hopr_transport::path::selector=debug
+EnvironmentFile=$DROPIN_DIR/bench.env
 EOF
 
 FLAGS=""
@@ -326,9 +327,19 @@ else
   echo "    no extra service flags (0-hop and 2+hop arms will be refused)"
 fi
 
-systemctl daemon-reload
-systemctl restart gnosisvpn
-sleep 3
+# Check the config BEFORE restarting: a broken one otherwise surfaces only as
+# systemd's "Job for gnosisvpn.service failed", with the reason in a log file.
+cfg="$(readlink -f "$GVPN_CONFIG_PATH")"
+if ! gvpn_config_check "$cfg"; then
+  echo "    the active config ($cfg) does not parse, so the service cannot start." >&2
+  echo "    repair it:  sudo ./tools/restore-config.sh --apply   then re-run this" >&2
+  exit 1
+fi
+if ! gvpn_service_restart; then
+  echo "    service did not start: $(gvpn_service_why | head -1)" >&2
+  echo "    details:    sudo ./tools/diagnose.sh" >&2
+  exit 1
+fi
 
 # ----------------------------------------------------------------- summary --
 
@@ -350,9 +361,9 @@ echo "identity dir: /var/lib/gnosisvpn/.config"
 echo "service log:  /var/log/gnosisvpn/gnosisvpn.log"
 echo "cc (local):   $(sysctl -n net.ipv4.tcp_congestion_control)"
 echo
-echo "Next:"
-echo "  1. ./01-iperf-server.sh          on the far-end VPS (different AS)"
-echo "  2. ./02-make-arms.sh --help      build the arm configs"
-echo "  3. gnosis_vpn-ctl start-client 30m && gnosis_vpn-ctl status"
-echo "     -- onboard once and reach Ready before benchmarking anything"
-echo "  4. VERIFY SSH SURVIVES A CONNECT (see above) before any long run"
+echo "Next (docs/run.md):"
+echo "  1. gnosis_vpn-ctl start-client 60m && watch -n5 gnosis_vpn-ctl status"
+echo "     -- onboard once and wait for Ready (skip if already onboarded)"
+echo "  2. make backup                           back up the funded identity"
+echo "  3. sudo -E ./setup/02-make-arms.sh       render the arms"
+echo "  4. verify SSH survives a tunnel connect (see above) before any long run"

@@ -21,6 +21,11 @@ to low tens, not 50. And `min_paths_anonymity_floor` is a **cap despite its
 name**: `prune_for_consistency` returns early if `candidates.len() <= floor`,
 otherwise prunes *down* to it, dropping highest-latency first.
 
+That matters for reading the arms: the jura network configs set
+`min_paths_anonymity_floor = 3`, so on jura **`auto` already draws from at most 3
+candidates**. `narrow` then differs from `auto` mainly in weighting and
+exploration, not in candidate count.
+
 ## 2 · The config keys named in the issue do not pin a path
 
 `min_channel` / `max_channel` / relay allowlist map onto
@@ -72,6 +77,12 @@ deserializes `HoprLibConfig` straight from disk and never calls `apply()`, so it
 is the one mode in which the planner cannot be influenced at all. Every arm here
 therefore runs in **generated** mode and differs only in the keys its
 `config.toml` names.
+
+The packaged network configs already declare `[connection.path_planner]`, so an
+arm's keys must be **merged into** that table, not appended as a second one — TOML
+rejects a table declared twice, and `gnosis_vpn-root` maps every config error to
+exit 66. `lib/tomlmerge.py` does the merge and refuses to write a config that
+does not parse; `tests/run-config-tests.sh` pins it.
 
 ---
 

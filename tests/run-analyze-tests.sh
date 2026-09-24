@@ -14,7 +14,7 @@
 #   broken   the pinned arm still drawing many routes
 #                                                  -> must refuse to report at all
 #
-# The third is the one that matters. A run where the manual hopr-lib config never
+# The third is the one that matters. A run where the planner override never
 # loaded produces perfectly plausible tables comparing 'auto' with itself, and
 # nothing in the numbers says so.
 #

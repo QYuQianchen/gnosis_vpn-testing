@@ -1,0 +1,33 @@
+# Shaped like the packaged network configs: path_planner and strategy tables
+# ALREADY present, destinations interleaved with other tables, a multi-line array.
+
+[destinations.USA]
+meta = { location = "USA" }
+address = "0x0000000000000000000000000000000000000001"   # scan-secrets: allow
+path = { intermediates = [] }
+
+[destinations.UK]
+meta = { location = "UK" }
+address = "0x0000000000000000000000000000000000000002"   # scan-secrets: allow
+path = { hops = 1 }
+
+[destinations.India]
+meta = { location = "India" }
+address = "0x0000000000000000000000000000000000000003"   # scan-secrets: allow
+
+[connection.surb_balancing.main]
+max_surb_upstream = "1 Mb/s"
+
+[connection.path_planner]
+# Prune to the 3 fastest candidate paths.
+min_paths_anonymity_floor = 3
+
+[strategy]
+min_open_channels = 3
+
+[strategy.channel_allowlist]
+enabled = false
+peers = [
+  "0x00000000000000000000000000000000000000aa",   # scan-secrets: allow
+  "0x00000000000000000000000000000000000000bb",   # scan-secrets: allow
+]

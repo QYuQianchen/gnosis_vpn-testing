@@ -122,36 +122,22 @@ for a in $ARMS; do
 done
 
 for a in $ARMS; do
-  if [ -f "$GVPN_ARMS_DIR/$a/UNAVAILABLE" ]; then
-    bad "arm '$a' cannot run -- its mechanism does not exist in this build"
-    sed 's/^/        /' "$GVPN_ARMS_DIR/$a/UNAVAILABLE" | head -6
-    note "full note: $GVPN_ARMS_DIR/$a/UNAVAILABLE"
-  elif [ -d "$GVPN_ARMS_DIR/$a" ]; then
-    pass "arm '$a' is rendered"
+  f="$GVPN_ARMS_DIR/$a/config.toml"
+  if [ ! -f "$f" ]; then
+    bad "arm '$a' not rendered -- run: sudo -E ./setup/02-make-arms.sh"
+  elif ! gvpn_config_check "$f"; then
+    bad "arm '$a' config does not parse -- re-render: sudo -E ./setup/02-make-arms.sh"
   else
-    bad "arm '$a' not in $GVPN_ARMS_DIR -- run: sudo -E ./setup/02-make-arms.sh"
+    pass "arm '$a' is rendered and parses"
   fi
 done
-
-if grep -rlE 'FILL_ME_IN|@RELAY@|@MIN_ACK_RATE@' "$GVPN_ARMS_DIR" >/dev/null 2>&1; then
-  bad "unsubstituted placeholders in rendered arms:"
-  grep -rlE 'FILL_ME_IN|@RELAY@|@MIN_ACK_RATE@' "$GVPN_ARMS_DIR" | sed 's/^/        /'
-  note "The node had not onboarded when make arms ran. Re-run it."
-else
-  pass "no unsubstituted placeholders in rendered arms"
-fi
 
 if systemctl is-active --quiet gnosisvpn; then
   pass "gnosisvpn service is active"
 else
-  bad "gnosisvpn service is not active -- systemctl status gnosisvpn"
-  code="$(systemctl show gnosisvpn -p ExecMainStatus --value 2>/dev/null)"
-  case "$code" in
-    66) note "exit 66 = EX_NOINPUT: a file could not be OPENED, so the config was"
-        note "never read. Most often the node was never onboarded and has no"
-        note "identity yet. Check: ls -l /var/lib/gnosisvpn/.config" ;;
-    78) note "exit 78 = EX_CONFIG: the config was read and rejected -- a bad key" ;;
-  esac
+  bad "gnosisvpn service is not active"
+  gvpn_service_why | while read -r l; do note "$l"; done
+  note "repair: sudo ./tools/restore-config.sh --apply   details: sudo ./tools/diagnose.sh"
 fi
 
 # The service being active is NOT the same as the client running. systemd starts
@@ -175,16 +161,22 @@ case "$st" in
                            note "start it with: gnosis_vpn-ctl start-client 60m" ;;
 esac
 
+if gvpn_config_check "$(readlink -f "$GVPN_CONFIG_PATH")"; then
+  pass "active config parses ($(readlink -f "$GVPN_CONFIG_PATH"))"
+else
+  bad "active config does not parse -- repair: sudo ./tools/restore-config.sh --apply"
+fi
+
 # An unpinned version is the single most expensive silent failure available: the
 # client upgrades mid-study and the run compares versions instead of arms.
-INSTALLED="$(dpkg-query -W -f='${Version}' gnosis-vpn-client 2>/dev/null || true)"
+INSTALLED="$(dpkg-query -W -f='${Version}' gnosisvpn 2>/dev/null || true)"
 
 # Pinning has to be a deliberate act -- but TYPING the version is not, and a
 # string like 2026.09.17+build.134506 is exactly the kind a transcription error
 # survives unnoticed until the manifest is read weeks later.
 if [ "$PIN_CURRENT" = 1 ]; then
   if [ -z "$INSTALLED" ]; then
-    bad "--pin-current but no gnosis-vpn-client package is installed"
+    bad "--pin-current but no gnosisvpn package is installed"
   else
     if grep -q '^GVPN_PIN_VERSION=' "$STUDY_FILE"; then
       sed -i "s|^GVPN_PIN_VERSION=.*|GVPN_PIN_VERSION=$INSTALLED|" "$STUDY_FILE"
@@ -221,11 +213,15 @@ fi
 
 # Without planner DEBUG there are no candidate-path lines, so stage B cannot
 # tell a genuine pin of 1 from a count of nothing.
-if systemctl show gnosisvpn -p Environment | tr ' ' '\n' | grep -q 'RUST_LOG.*path'; then
-  pass "planner DEBUG logging is on"
+# Checked in the RUNNING process: RUST_LOG arrives via EnvironmentFile=, which
+# `systemctl show -p Environment` does not list, and a later env file can win.
+pid="$(systemctl show gnosisvpn -p MainPID --value 2>/dev/null)"
+if [ "${pid:-0}" != 0 ] && tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+     | grep -q '^RUST_LOG=.*path::planner=debug'; then
+  pass "planner DEBUG logging is on in the running service"
 else
-  bad "planner DEBUG logging is off -- route counts will be impossible"
-  note "00-vm-setup.sh installs it as 10-bench-logging.conf."
+  bad "planner DEBUG logging is not active -- route counts will be impossible"
+  note "re-run: sudo ./setup/00-vm-setup.sh --network <net>"
 fi
 
 # The policy route is what keeps your SSH session alive when the tunnel takes
@@ -281,7 +277,7 @@ for a in $ARMS; do
   printf '\n  --- %s ---\n' "$a"
   out="$("$KIT/bench/use-arm.sh" "$a" --count 2>&1)"
   echo "$out" | sed 's/^/  /'
-  n="$(printf '%s' "$out" | sed -n 's/.*drew from \([0-9][0-9]*\) distinct route.*/\1/p' | tail -1)"
+  n="$(printf '%s' "$out" | sed -n 's/.* routes=\([0-9][0-9]*\).*/\1/p' | tail -1)"
   if [ -z "$n" ]; then
     bad "arm '$a' produced no route count"
     continue
@@ -296,8 +292,8 @@ for a in $ARMS; do
   case "$a" in
     pin-planner|zero-hop)
       if [ "$n" -eq 1 ]; then pass "$a drew 1 route (pinned, as designed)"
-      else bad "$a drew $n routes, expected 1 -- the manual hopr config is not being read"
-           note "check /etc/systemd/system/gnosisvpn.service.d/30-arm.conf" ; fi ;;
+      else bad "$a drew $n routes, expected 1 -- its [connection.path_planner] override is not applied"
+           note "check: sudo ./bench/use-arm.sh --show" ; fi ;;
     narrow)
       if [ "$n" -le 3 ]; then pass "$a drew $n route(s) (cap is 3)"
       else bad "$a drew $n routes, expected <=3" ; fi ;;

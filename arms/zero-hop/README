@@ -1,5 +1,3 @@
-UPPER BOUND, NOT A PRODUCT CONFIGURATION. No relay in the path at all, so
-whatever throughput and variance remains belongs to the entry, the exit,
-WireGuard and the session layer. Requires the service to run with
---allow-insecure (00-vm-setup.sh --allow-insecure), and exposes this client's
-IP to the exit. Throwaway identity only.
+UPPER BOUND, NOT A PRODUCT CONFIGURATION. No relay at all: what remains is the entry,
+the exit, WireGuard and the session layer. Needs the service started with
+--allow-insecure (00-vm-setup.sh does it), and exposes this VM's IP to the exit.

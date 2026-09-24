@@ -1,16 +1,3 @@
-BOTH LEGS, ON A TRIMMED NODE. The partner of pin-cfg-@RELAY@: identical channel
-allowlist, so the node keeps exactly one outgoing channel, plus
+BOTH LEGS, ON A TRIMMED NODE. Same one-channel allowlist as pin-cfg-@RELAY@, plus
 max_cached_paths = 1 so the return draw collapses too.
-
-Run it ONLY alongside its pin-cfg partner, as their own study. Read the pair:
-
-  pin-cfg-@RELAY@          forward pinned by topology, return free
-  pin-cfg-pinned-@RELAY@   forward AND return pinned
-
-The gap between them is what the return leg costs. Neither belongs in a run with
-'auto', because the trimmed channel set is node-global -- on a one-channel node
-'auto' is not auto, it is this arm without the allowlist to hold it there.
-
-Both carry the allowlist for a reason: without it, the strategy would reopen the
-channels you closed during that arm's sessions, un-trimming the node midway
-through the study with nothing in the data marking where.
+The pair differs only in the return leg. Run them together, as their own study.

@@ -179,26 +179,19 @@ def load_ping(path):
     return loss, jitter, rtt, sent
 
 
-_PATH_LINE = re.compile(r'\bpath="?(?P<path>[^",]+)"?')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import routes  # noqa: E402  -- the one route parser, shared with use-arm.sh
 
 
 def distinct_relays(path: Path):
-    """
-    Distinct routes named by the planner's DEBUG candidate lines. Needs
-    RUST_LOG=...hopr_transport::path::planner=debug; returns None when the lines are
-    absent, so the column reads '-' rather than a misleading 0.
-    """
+    """Distinct routes the planner drew, or None if it logged nothing (so the
+    column reads '-' rather than a misleading 0). See lib/routes.py."""
     if not path.exists():
         return None
-    seen, saw_any = set(), False
-    for line in path.read_text(errors="ignore").splitlines():
-        if "candidate path" not in line:
-            continue
-        saw_any = True
-        m = _PATH_LINE.search(line)
-        if m:
-            seen.add(m.group("path"))
-    return len(seen) if saw_any else None
+    r = routes.scan(path.read_text(errors="ignore"))
+    if not r["lines"]:
+        return None
+    return max(r["paths"], r["candidates"])
 
 
 # ---------------------------------------------------------------- per rep --
@@ -914,7 +907,7 @@ def main():
                        "--trial for that.")
     if pin_broken:
         caveats.append(f"'{champion}' drew from {stats[champion]['relays']:.1f} distinct "
-                       f"routes, not 1. The manual hopr-lib config is not being read — "
+                       f"routes, not 1. Its [connection.path_planner] override is not applied — "
                        f"check the systemd drop-in and re-run "
                        f"`use-arm.sh {champion} --count` until it reads 1.")
     if n_min < 30:

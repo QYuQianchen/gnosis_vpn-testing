@@ -1,7 +1,5 @@
-PINNED, BOTH LEGS, NO RECOMPILE. max_cached_paths = 1 collapses the weighted
-candidate collection to a single validated path, so every packet's forward route
-and every SURB's return route resolve to the same path. exploration = 0 removes
-the uniform-random draws on top.
-This is the arm that tests whether multipath striping is the floor mechanism:
-if the throughput DISTRIBUTION tightens here -- even at the same or slightly
-lower median -- striping is implicated.
+PINNED, BOTH LEGS. max_cached_paths = 1 leaves the planner one candidate, so every
+packet's forward route and every SURB's return route is the same path;
+return_path_exploration = 0 removes the random return draws.
+Tests whether multipath striping causes the floors: if the throughput
+DISTRIBUTION tightens -- even at a slightly lower median -- striping is implicated.

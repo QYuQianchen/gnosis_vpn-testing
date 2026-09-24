@@ -1,4 +1,5 @@
-
+# One outgoing channel, to @RELAY@. The allowlist stops the strategy reopening
+# the channels you close; it closes nothing itself. See PREREQUISITE.
 [strategy]
 min_open_channels    = 1
 target_open_channels = 1
@@ -7,9 +8,7 @@ target_open_channels = 1
 enabled = true
 peers   = ["@RELAY@"]
 
-# ...and the return leg pinned too. Its partner arm holds the same trimmed
-# channel set with the return draw left free; the gap between the two is the
-# return leg's contribution, isolated.
+# ...and the return leg pinned too.
 [connection.path_planner]
 max_cached_paths = 1
 return_path_exploration = 0.0

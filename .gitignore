@@ -16,15 +16,13 @@ BUILD.txt
 # --- state that must never be tracked ---------------------------------------
 gvpn-state/
 *.safe
-hopr.yaml
 *.identity
 
 # arms/ IS tracked: it holds templates, which carry no addresses. Rendered
 # instances go to $GVPN_STATE/arms. This catches a rendered one written here by
 # mistake -- a template has no config.toml.
 arms/*/config.toml
-arms/*/hopr.yaml
-arms/*/env
+arms/*/arms/*/env
 arms/*/.template
 
 # --- noise ------------------------------------------------------------------

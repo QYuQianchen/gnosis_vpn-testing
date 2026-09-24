@@ -1,4 +1,4 @@
-MIDDLE GROUND. Three candidates instead of fifty, weights untempered so the best
-one dominates, no blind exploration. If this recovers most of pin-planner's
-benefit, there is a shippable setting that keeps some relay diversity -- which
-matters, because diversity is a privacy and resilience property, not just cost.
+MIDDLE GROUND. At most 3 candidates, weights untempered (the best one dominates),
+no random return draws. On jura the network config already caps auto at 3
+candidates, so here the difference from auto is mainly the weighting, not the count.
+Close to pin-planner  =>  a shippable setting that keeps some relay diversity.

@@ -1,12 +1,9 @@
-Close all outgoing channels except the one to @RELAY@. Scriptable and
-non-interactive -- the node key signs via the Safe's module, and blokli does the
-reads and the broadcast:
+Trim the node to one outgoing channel first (docs/studies.md, study 2):
 
-  sudo -E ./tools/close-channels.py --keep @RELAY@          # plan only
-  sudo -E ./tools/close-channels.py --keep @RELAY@ --send   # do it
-  sudo -E ./tools/close-channels.py --finalize --send       # after the grace period
+  sudo ./bench/use-arm.sh pin-cfg-@RELAY@                      # allowlist FIRST
+  sudo -E ./tools/close-channels.py --keep @RELAY@ --send      # initiate closes
+  sudo -E ./tools/close-channels.py --finalize --send          # after the grace period
+  sudo ./bench/use-arm.sh pin-cfg-@RELAY@ --count              # must read 1
 
-No RPC endpoint and no contract address to look up: BLOKLI_URL (default
-https://blokli.jura.hoprnet.link) is the only endpoint. Set the allowlist FIRST
-so the strategy does not reopen what you close. No new identity, no faucet code;
-stakes return to the Safe. Verify with --count before running a study.
+The allowlist only stops NEW channels being opened; it closes nothing. Without it
+in place, the strategy would reopen what you close.

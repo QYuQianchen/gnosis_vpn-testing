@@ -165,12 +165,11 @@ if [ "$BEFORE" != "$AFTER" ]; then
 
     VERSION CHANGED -- two things to re-check before trusting any measurement:
 
-    1. The pinned arms depend on protocol.path_planner keys (max_cached_paths,
-       return_path_exploration). HoprLibConfig is deny_unknown_fields, so if
-       those were renamed the service refuses to start with the arm's hopr.yaml
-       rather than warning. Re-run the arm validation:
-         sudo ./setup/02-make-arms.sh --out ./arms --destination ${GVPN_DESTINATION:-UK}
-       then the validation block it prints.
+    1. The arms depend on [connection.path_planner] keys (max_cached_paths,
+       return_path_exploration). The config is deny_unknown_fields, so a renamed
+       key stops the service (exit 66). Re-render and re-count:
+         sudo -E ./setup/02-make-arms.sh
+         sudo ./bench/use-arm.sh pin-planner --count
 
     2. Results from the old build are NOT comparable with results from this one.
        Start a fresh run directory; do not pool them.

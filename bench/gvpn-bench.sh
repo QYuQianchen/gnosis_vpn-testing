@@ -147,7 +147,7 @@ FLUSH_TCP_METRICS="${GVPN_FLUSH_TCP_METRICS:-1}"
 # tunnel itself -- curl pulls a fixed volume from a public endpoint and the byte
 # counter is sampled once a second, producing the same shape iperf3 --interval 1
 # does, so the analyser needs no special case.
-TARGET="${GVPN_TARGET:-iperf3}"          # iperf3 | url
+TARGET="${GVPN_TARGET:-url}"             # url (no second machine) | iperf3
 # {bytes} is substituted with the wanted volume. Cloudflare's endpoint returns
 # exactly N bytes, which is what makes bytes-mode exact without Range requests.
 DL_URL="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
@@ -166,54 +166,9 @@ PING_INTERVAL="${GVPN_PING_INTERVAL:-0.25}"
 # many GB of planner DEBUG logging, and anything inside the worktree is one
 # deploy or one `git clean -fdx` from gone.
 OUT_ROOT="${GVPN_OUT_ROOT:-$GVPN_RUNS_DIR}"
-CONFIG_PATH="${GNOSISVPN_CONFIG_PATH:-/etc/gnosisvpn/config.toml}"
 
-# ---------------------------------------------------------------- config IO --
-#
-# /etc/gnosisvpn/config.toml is a SYMLINK the installer uses to select a network
-# (-> config-jura-prod.toml). Two consequences this kit got wrong:
-#
-#   cp FILE config.toml     follows the link and OVERWRITES the packaged network
-#                           config, destroying it -- there is no other copy.
-#   cp -a config.toml BAK   copies the LINK, not its contents, so the "backup"
-#                           is a second symlink to the file being overwritten.
-#                           Restoring from it restores nothing.
-#
-# So an arm is installed the way the installer itself switches networks: write a
-# file of our own and re-point the symlink. The packaged configs are never
-# touched, and rollback is re-pointing the link back.
-ARM_CONFIG="${GVPN_ARM_CONFIG:-/etc/gnosisvpn/config-gvpn-arm.toml}"
-CONFIG_ORIG_MARKER="${GVPN_CONFIG_ORIG:-/etc/gnosisvpn/.gvpn-config-original}"
-
-# Remember what config.toml pointed at BEFORE this kit ever touched it, once.
-remember_original_config() {
-  [ -e "$CONFIG_ORIG_MARKER" ] && return 0
-  if [ -L "$CONFIG_PATH" ]; then
-    readlink -f "$CONFIG_PATH" > "$CONFIG_ORIG_MARKER"
-  elif [ -f "$CONFIG_PATH" ]; then
-    # Not a symlink on this node: keep a real copy of the contents.
-    cp "$CONFIG_PATH" "$CONFIG_PATH.gvpn-original"
-    printf '%s\n' "$CONFIG_PATH.gvpn-original" > "$CONFIG_ORIG_MARKER"
-  fi
-}
-
-install_arm_config() {  # install_arm_config SRC
-  remember_original_config
-  cp "$1" "$ARM_CONFIG"
-  chmod 0644 "$ARM_CONFIG"
-  # Match the packaged configs so the worker user can read it.
-  chown --reference="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || echo "$ARM_CONFIG")" \
-        "$ARM_CONFIG" 2>/dev/null || true
-  ln -sfn "$ARM_CONFIG" "$CONFIG_PATH"
-}
-
-restore_original_config() {
-  local orig; orig="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || true)"
-  [ -n "$orig" ] && [ -e "$orig" ] || return 1
-  ln -sfn "$orig" "$CONFIG_PATH"
-}
-HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
-DROPIN="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf"
+# Left by kits before the config.toml fix; removed on every arm switch.
+LEGACY_ARM_FILES="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf /etc/gnosisvpn/hopr-arm.yaml"
 CTL="${GVPN_CTL:-gnosis_vpn-ctl}"
 
 TELEMETRY_INTERVAL="${GVPN_TELEMETRY_INTERVAL:-5}"
@@ -230,10 +185,6 @@ KEEPALIVE="${GVPN_KEEPALIVE:-60m}"
 DEADMAN_MARGIN="${GVPN_DEADMAN_MARGIN:-120}"
 DEADMAN_HARD=""
 
-# Faucet codes live in the state directory, not the repo: they are single-use
-# money, and a repo-relative path put them one `git clean` from gone and one
-# careless `git add -A` from published.
-
 ASSUME_MBPS="${GVPN_ASSUME_MBPS:-5}"
 CONNECT_EST="${GVPN_CONNECT_EST:-40}"
 
@@ -241,7 +192,7 @@ DETACH=0
 
 # A rehearsal of THIS study rather than a different study. It keeps the arms,
 # the exits and the load source exactly as configured and shrinks only the
-# amount of work, so what it exercises is the real config path: the arm yamls,
+# amount of work, so what it exercises is the real config path: the arm configs,
 # the interleaving, the connect/disconnect cycle, the report, the publish step.
 # A smaller --profile would exercise a DIFFERENT configuration, which is how a
 # rehearsal passes and the real run then fails on the first cycle.
@@ -252,7 +203,7 @@ usage() {
   cat <<EOF
 gvpn-bench.sh $VERSION -- pinned-vs-auto path benchmark (hoprnet#8408)
 
-Usage: $0 --iperf-server HOST [--profile NAME] [options]
+Usage: $0 [--profile NAME] [--target url|iperf3 [-s HOST]] [options]
 
 Profiles:
   smoke        1 cycle,  1 rep,  bytes 25M        ~6 min    rig check
@@ -290,7 +241,7 @@ Setup:
   -D, --destination ID    single exit destination
       --destinations "A B"  compare across several exits; every arm runs against
                           every exit each cycle (multiplies the schedule)
-  -s, --iperf-server H    iperf3 server  [required]
+  -s, --iperf-server H    iperf3 server (only with --target iperf3)
       --iperf-port P      (default: $IPERF_PORT)
   -o, --out DIR           (default: $OUT_ROOT)
       --dry-run           print the schedule and estimate, then exit
@@ -534,6 +485,9 @@ cleanup() {
   log "cleanup: disconnecting"
   ctl disconnect  >/dev/null 2>&1
   ctl stop-client >/dev/null 2>&1
+  # Leave the node on its network config, not on whichever arm ran last.
+  gvpn_restore_original && gvpn_service_restart >/dev/null 2>&1 \
+    && log "cleanup: network config restored" || log "cleanup: could not restore the network config"
   echo 0 > "$DEADLINE_FILE" 2>/dev/null
   sleep 8
   kill "$WATCHDOG_PID" 2>/dev/null
@@ -551,43 +505,21 @@ cleanup() {
 
 # ------------------------------------------------------- service / configs --
 
-svc_stop()  { if [ -n "${GVPN_SVC_STOP_CMD:-}" ]; then eval "$GVPN_SVC_STOP_CMD"; else systemctl stop gnosisvpn; fi; }
-svc_start() { if [ -n "${GVPN_SVC_START_CMD:-}" ]; then eval "$GVPN_SVC_START_CMD"; else systemctl start gnosisvpn; fi; }
-
-# An arm is three things: the client config, an optional manual hopr-lib config
-# (which is what carries the path-planner knobs), and the drop-in that points the
-# service at it. All three are rewritten every time, including being REMOVED when
-# an arm does not use them -- otherwise a planner-pinned arm would silently leak
-# into the next arm's sessions and quietly invalidate the whole comparison.
+# An arm is one complete config.toml (planner knobs in [connection.path_planner]).
+# Installing it re-points the config.toml symlink; see lib/common.sh.
 apply_arm_config() {  # apply_arm_config ARM_DIR
   local arm_dir="$1"
-  [ -f "$arm_dir/config.toml" ] || { log "  no config.toml in $arm_dir"; return 1; }
-
   ctl stop-client >/dev/null 2>&1
-  svc_stop >>"$RUN_LOG" 2>&1
-  sleep 2
-
-  install_arm_config "$arm_dir/config.toml" || return 1
-
-  mkdir -p "$(dirname "$DROPIN")"
-  # Legacy cleanup: older kit versions installed a hopr-lib YAML here and pointed
-  # the service at it with GNOSISVPN_HOPR_CONFIG_PATH. That lever never worked
-  # (docs/design.md section 3) and a leftover file would break every arm, so it
-  # is removed on every install, not only when switching to generated mode.
-  rm -f "$DROPIN" "$HOPR_YAML_DEST"
-  systemctl daemon-reload 2>/dev/null || true
-
-  [ -f "$arm_dir/flags" ] && log "  arm needs service flags: $(tr '\n' ' ' < "$arm_dir/flags")"
-
-  svc_start >>"$RUN_LOG" 2>&1
-  if ! wait_for "$SERVICE_TIMEOUT" "service socket after config swap" \
-                bash -c "$CTL ping >/dev/null 2>&1"; then
-    # Nearly always a rejected manual hopr-lib config: the struct is
-    # deny_unknown_fields, so one wrong key stops the service dead.
-    log "  service did not come back; last journal lines:"
-    journalctl -u gnosisvpn -n 20 --no-pager 2>/dev/null | tee -a "$RUN_LOG" >/dev/null
+  rm -f $LEGACY_ARM_FILES
+  gvpn_install_arm "$arm_dir/config.toml" >>"$RUN_LOG" 2>&1 || return 1
+  if ! gvpn_service_restart; then
+    log "  service did not start with this arm: $(gvpn_service_why | head -1)"
+    gvpn_service_why | tail -n +2 | tee -a "$RUN_LOG" >/dev/null
+    gvpn_restore_original && gvpn_service_restart >/dev/null 2>&1 || true
     return 1
   fi
+  wait_for "$SERVICE_TIMEOUT" "service socket after config swap" \
+           bash -c "$CTL ping >/dev/null 2>&1"
 }
 
 detect_identity_dir() {
@@ -807,12 +739,6 @@ esac
 
 [ -n "$ARMS" ] || ARMS="$(cd "$ARMS_DIR" && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ' ')"
 [ -n "$ARMS" ] || { echo "no arms found in $ARMS_DIR" >&2; exit 1; }
-for _a in $ARMS; do
-  if [ -f "$ARMS_DIR/$_a/UNAVAILABLE" ]; then
-    echo "arm '$_a' cannot run -- see $ARMS_DIR/$_a/UNAVAILABLE" >&2
-    exit 2
-  fi
-done
 ARM_COUNT=$(printf '%s\n' $ARMS | grep -c .)
 
 # One list drives the loop whether the user gave one exit or several.
@@ -867,19 +793,6 @@ describe_schedule() {
   fi
 }
 
-# A FRESH-IDENTITY ARM CANNOT SHARE A RUN WITH ANY OTHER ARM.
-#
-# An allowlist only constrains channels while they are being OPENED, so such an
-# arm re-onboards: new identity, and exactly as many channels as its allowlist
-# permits. That identity then belongs to the whole node. Every later session of
-# every OTHER arm runs on it -- so `auto` after the re-onboard is a one-channel
-# node, which is not the `auto` that ran before it and not the `auto` anyone
-# means. The strategy will open more channels back up over time, which is worse
-# than a clean break: the contamination fades gradually and nothing in the data
-# marks where it ended.
-#
-# Interleaving cannot fix this. It is the one comparison in this kit that has to
-# be its own study, against its own baseline.
 # No shipped arm re-onboards, and none should: a new identity belongs to the
 # NODE, not to the arm, so every later session of every other arm would run on
 # it. Retargeting channels is an ordinary on-chain close (tools/close-channels.py)
@@ -974,9 +887,9 @@ dm_start
 log "gvpn-bench.sh $VERSION starting"
 log "run dir:     $RUN_DIR"
 describe_schedule | while IFS= read -r l; do log "$l"; done
-log "iperf3:      $IPERF_SERVER:$IPERF_PORT"
+[ "$TARGET" = iperf3 ] && log "iperf3:      $IPERF_SERVER:$IPERF_PORT"
 log "local cc:    $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?') (upload sender)"
-log "RUST_LOG:    ${RUST_LOG:-<from service drop-in>}"
+log "RUST_LOG:    $(tr '\0' '\n' < "/proc/$(systemctl show gnosisvpn -p MainPID --value)/environ" 2>/dev/null | sed -n 's/^RUST_LOG=//p') (the service's)"
 log "ctl version: $($CTL -V 2>&1)"
 
 # Provenance. Six weeks from now the only defensible answer to "what binary
