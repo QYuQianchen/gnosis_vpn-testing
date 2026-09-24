@@ -9,7 +9,7 @@
 #
 #   Keeping generated arms and faucet codes outside the repo handles the obvious
 #   path. It does not handle the realistic one: pasting a journalctl extract into
-#   docs/plan.md, committing a report with a peer ID in a log excerpt, or adding a
+#   docs/design.md, committing a report with a peer ID in a log excerpt, or adding a
 #   "just this once" hopr.yaml while debugging at 1am. Those arrive through files
 #   that are supposed to be tracked, so no .gitignore can catch them.
 #

@@ -156,7 +156,7 @@ if [ -n "\$bad" ]; then
   echo "  !! REFUSING TO DEPLOY: paths in the worktree are not owned by \$me:" >&2
   echo "\$bad" | sed 's/^/       /' >&2
   echo "     These are leftovers from a sudo run. Move them into the state" >&2
-  echo "     directory -- they do not belong in the worktree (docs/migration.md):" >&2
+  echo "     directory -- they do not belong in the worktree (docs/run.md):" >&2
   echo "       sudo mv arms ~/gvpn-state/arms-old" >&2
   echo "       sudo mv bench-runs/* ~/gvpn-state/runs/ && sudo rmdir bench-runs" >&2
   echo "       sudo chown -R \$me: ~/gvpn-state" >&2
@@ -216,7 +216,7 @@ cat <<EOF
     git remote add vm "$HOSTPART:$REMOTE_PATH"
     git push -u vm $BRANCH
 
-With an SSH config alias (docs/dev-workflow.md), nicer as:
+With an SSH config alias (docs/run.md), nicer as:
 
     git remote set-url vm gvpn-vm:$REMOTE_PATH
 

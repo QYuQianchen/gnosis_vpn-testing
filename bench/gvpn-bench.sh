@@ -533,16 +533,11 @@ apply_arm_config() {  # apply_arm_config ARM_DIR
   cp "$arm_dir/config.toml" "$CONFIG_PATH" || return 1
 
   mkdir -p "$(dirname "$DROPIN")"
-  if [ -f "$arm_dir/hopr.yaml" ] || [ -f "$arm_dir/env" ]; then
-    { echo "[Service]"
-      [ -f "$arm_dir/hopr.yaml" ] && cp "$arm_dir/hopr.yaml" "$HOPR_YAML_DEST"
-      [ -f "$arm_dir/env" ] && while IFS= read -r line; do
-        [ -n "$line" ] && printf 'Environment=%s\n' "$line"
-      done < "$arm_dir/env"
-    } > "$DROPIN"
-  else
-    rm -f "$DROPIN" "$HOPR_YAML_DEST"
-  fi
+  # Legacy cleanup: older kit versions installed a hopr-lib YAML here and pointed
+  # the service at it with GNOSISVPN_HOPR_CONFIG_PATH. That lever never worked
+  # (docs/design.md section 3) and a leftover file would break every arm, so it
+  # is removed on every install, not only when switching to generated mode.
+  rm -f "$DROPIN" "$HOPR_YAML_DEST"
   systemctl daemon-reload 2>/dev/null || true
 
   [ -f "$arm_dir/flags" ] && log "  arm needs service flags: $(tr '\n' ' ' < "$arm_dir/flags")"

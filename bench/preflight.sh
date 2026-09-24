@@ -117,7 +117,7 @@ stage "A  static checks"
 for a in $ARMS; do
   case "$a" in
     pin-cfg-*) bad "'$a' cannot run in a normal study -- it needs the channel set trimmed."
-               note "That is study 2. See docs/running-all-arms.md." ;;
+               note "That is study 2. See docs/studies.md." ;;
   esac
 done
 

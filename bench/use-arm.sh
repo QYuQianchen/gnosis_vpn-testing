@@ -76,8 +76,8 @@ show() {
   say "currently installed"
   echo "  config.toml destinations:"
   grep -E '^\[destinations\.|^path' "$CONFIG_PATH" 2>/dev/null | sed 's/^/    /' || true
-  echo "  manual hopr config: $([ -f "$HOPR_YAML_DEST" ] && echo "$HOPR_YAML_DEST" || echo '<none -- generated mode>')"
-  [ -f "$HOPR_YAML_DEST" ] && sed -n '/path_planner/,$p' "$HOPR_YAML_DEST" | sed 's/^/    /'
+  echo "  planner overrides:"
+  sed -n '/\[connection.path_planner\]/,/^$/p' "$CONFIG_PATH" 2>/dev/null | sed 's/^/    /'
   echo "  drop-in: $([ -f "$DROPIN" ] && echo present || echo '<none>')"
   [ -f "$DROPIN" ] && sed 's/^/    /' "$DROPIN"
   echo "  service: $(systemctl is-active gnosisvpn 2>/dev/null || echo '?')"
@@ -112,20 +112,12 @@ cp -a "$CONFIG_PATH" "$CONFIG_PATH.use-arm-backup" 2>/dev/null || true
 cp "$ARM_DIR/config.toml" "$CONFIG_PATH"
 
 mkdir -p "$(dirname "$DROPIN")"
-if [ -f "$ARM_DIR/hopr.yaml" ] || [ -f "$ARM_DIR/env" ]; then
-  { echo "[Service]"
-    [ -f "$ARM_DIR/hopr.yaml" ] && cp "$ARM_DIR/hopr.yaml" "$HOPR_YAML_DEST"
-    [ -f "$ARM_DIR/env" ] && while IFS= read -r line; do
-      [ -n "$line" ] && printf 'Environment=%s\n' "$line"
-    done < "$ARM_DIR/env"
-  } > "$DROPIN"
-  echo "    manual hopr config + drop-in installed"
-else
-  # Removal matters as much as installation: a leftover pinned hopr.yaml would
-  # silently pin the NEXT arm too.
-  rm -f "$DROPIN" "$HOPR_YAML_DEST"
-  echo "    generated hopr config (drop-in and hopr.yaml removed)"
-fi
+# Legacy cleanup: older kit versions installed a hopr-lib YAML here and pointed
+# the service at it with GNOSISVPN_HOPR_CONFIG_PATH. That lever never worked
+# (docs/design.md section 3) and a leftover file would break every arm, so it
+# is removed on every install, not only when switching to generated mode.
+rm -f "$DROPIN" "$HOPR_YAML_DEST"
+echo "    config.toml installed (generated hopr config)"
 
 [ -f "$ARM_DIR/flags" ] && echo "    NOTE: this arm needs service flags: $(tr '\n' ' ' < "$ARM_DIR/flags")"
 if [ -f "$ARM_DIR/PREREQUISITE" ]; then
