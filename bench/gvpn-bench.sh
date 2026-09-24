@@ -99,7 +99,7 @@
 #
 # Arm directory (see 02-make-arms.sh):
 #     config.toml           -> /etc/gnosisvpn/config.toml
-#     hopr.yaml             -> $HOPR_YAML_DEST, selected via GNOSISVPN_HOPR_CONFIG_PATH
+#     config.toml           -> the whole arm, including [connection.path_planner]
 #     env                   -> extra systemd Environment= lines
 #     flags                 -> service flags this arm needs (informational)
 #     needs_fresh_identity  -> re-onboard before this arm's first session
@@ -852,6 +852,12 @@ esac
 
 [ -n "$ARMS" ] || ARMS="$(cd "$ARMS_DIR" && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ' ')"
 [ -n "$ARMS" ] || { echo "no arms found in $ARMS_DIR" >&2; exit 1; }
+for _a in $ARMS; do
+  if [ -f "$ARMS_DIR/$_a/UNAVAILABLE" ]; then
+    echo "arm '$_a' cannot run -- see $ARMS_DIR/$_a/UNAVAILABLE" >&2
+    exit 2
+  fi
+done
 ARM_COUNT=$(printf '%s\n' $ARMS | grep -c .)
 
 # One list drives the loop whether the user gave one exit or several.

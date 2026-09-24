@@ -1,0 +1,14 @@
+
+# PIN BOTH LEGS. max_cached_paths = 1 collapses the weighted candidate
+# collection to a single validated path, so every packet's forward route and
+# every SURB's return route resolve to the same path. exploration = 0 removes
+# the uniform-random draws layered on top of the weighting.
+#
+# This goes in gnosis_vpn's OWN config.toml, not a hopr-lib yaml: hopr-lib's
+# protocol.path_planner is serde(skip) and cannot be set from a file at all.
+# gnosis_vpn builds it in code -- latency_path_planner_config() for the preset,
+# then PathPlannerOptions::apply() layers this section on top. Unset fields keep
+# the preset, so this arm differs from `auto` in exactly these two keys.
+[connection.path_planner]
+max_cached_paths = 1
+return_path_exploration = 0.0

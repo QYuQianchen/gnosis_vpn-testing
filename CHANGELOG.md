@@ -8,6 +8,86 @@ measurement method, the analysis, the profiles. Not for docs or comments.
 
 ## Unreleased
 
+### The planner lever is real — but in config.toml, not the hopr yaml
+
+`protocol.path_planner` cannot be set from a hopr-lib YAML: the field is
+`#[cfg_attr(feature = "serde", serde(skip))]` and `PathPlannerConfig` derives no
+serde at all, so it is absent from the schema, and `deny_unknown_fields` turns
+the attempt into a hard failure. That part of the retraction below stands.
+
+But the planner *is* configurable, one layer up. gnosis_vpn sets it in code when
+it GENERATES the hopr config (`gnosis_vpn-lib/src/hopr/config.rs`):
+
+    cfg.protocol.path_planner = edgli::latency_path_planner_config(min_ack_rate);
+    // Layer user overrides on top of the latency preset; unset fields keep the preset value.
+    path_planner.apply(&mut cfg.protocol.path_planner);
+
+Those overrides are `PathPlannerOptions` (`connection/options.rs`) — every
+`PathPlannerConfig` field as an `Option` — and they are read from gnosis_vpn's
+own `config.toml` under **`[connection.path_planner]`**, as the shipped
+`gnosis_vpn-system_tests/networks/jura-dev/config.toml` demonstrates.
+
+So `GNOSISVPN_HOPR_CONFIG_PATH` was exactly backwards: `from_path` deserializes
+`HoprLibConfig` straight from disk and never applies the overrides, making it
+the one mode in which the planner cannot be influenced at all. The kit reached
+for the file path *because* it exposed the whole struct, without checking that
+the struct's planner field was reachable — or that the mode it was switching
+away from was the only one doing the work.
+
+- `pin-planner`, `no-explore`, `narrow` are restored as plain
+  `[connection.path_planner]` sections in `config.toml`. `_pin-cfg-pinned` too.
+- **Every arm now runs in generated mode**, which removes the asymmetry logged
+  below ("Arms are now a diff from the running config"): `apply()` leaves unset
+  fields at the preset, so an arm differs from `auto` in exactly the keys it
+  names. The `planner_preset` / `read_config_planner_overrides` layering in
+  `02-make-arms.sh` existed to emulate that by hand and is gone.
+- `hopr.yaml`, the `env` file and `HOPR_YAML_DEST` are gone with it.
+
+### RETRACTION: the planner arms never worked *as written*
+
+`protocol.path_planner` cannot be set from configuration. The field is declared
+
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub path_planner: crate::path::PathPlannerConfig,
+
+and `PathPlannerConfig` derives no serde at all — it is built in code, never
+read from a file or an environment variable. `HoprProtocolConfig` is
+`deny_unknown_fields`, so writing the key is not ignored; it stops the client.
+Verified on both `release/4.0` and `master` of hoprnet/hoprnet
+(`transport/hopr/src/config.rs`, `transport/hopr/src/path/planner.rs`) and
+confirmed by the client itself:
+
+    unknown field `path_planner`, expected one of transport, packet, probe,
+    session, mixer, transit_latency, stream, counter_flush_interval,
+    surb_flush_interval
+
+This retracts the central claim of the kit and of
+`claude/2026-09-11-issue-8408-...md` §1.3 — that `GNOSISVPN_HOPR_CONFIG_PATH`
+exposes the planner and gives "a genuine pin of both legs, no recompile". It
+does expose `HoprLibConfig`; the planner is simply not in it. I had read
+`planner.rs` and confirmed the field defaults, and inferred the config path from
+the struct rather than checking that it was reachable through serde.
+
+- `pin-planner`, `no-explore`, `narrow` now carry an `UNAVAILABLE` file with the
+  evidence. `use-arm.sh` refuses them before touching the node, `preflight.sh`
+  fails stage A on them, and `gvpn-bench.sh` refuses to schedule them.
+- `studies/2026-09-24-transfers-25mb.conf` now runs `auto zero-hop`.
+- What still works without a patch: **pinning by topology** — `pin-cfg-<relay>`
+  and its partner, which trim the node's channels so there is one forward path
+  because there is one edge (study 2), and `zero-hop` for the ceiling. A
+  planner-level pin now genuinely requires the Phase 4 patched build.
+
+### use-arm.sh left the node broken on a rejected config
+
+The post-install gate checked `systemctl is-active`, but a rejected hopr-lib
+config does not fail the *unit*: the worker starts, reads the file, and parks in
+Warmup with the parse error in its status string. So the check passed, the
+script went on to poll for five minutes, and the node was left wedged. It now
+asks the client itself, matches `config error|unknown field|missing field|Output
+error`, and **rolls back** — drop-in and manual yaml removed, previous
+config.toml restored, service restarted and re-verified. A benchmark tool that
+bricks the thing it measures is worse than one that refuses to run.
+
 ### Repository restructure
 
 - **State moved out of the worktree.** Raw runs, rendered arms, faucet codes and

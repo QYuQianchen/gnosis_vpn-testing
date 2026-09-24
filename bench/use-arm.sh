@@ -93,6 +93,16 @@ ARM_DIR="$ARMS_DIR/$ARM"
 say "installing arm: $ARM"
 [ -r "$ARM_DIR/README" ] && sed 's/^/    /' "$ARM_DIR/README"
 
+# Refuse before touching anything. An arm marked UNAVAILABLE is one whose
+# mechanism has been checked against the source and does not exist; installing
+# it would stop the client and the operator would be debugging their node
+# rather than reading this.
+if [ -f "$ARM_DIR/UNAVAILABLE" ]; then
+  say "ARM '$ARM' CANNOT RUN"
+  sed 's/^/    /' "$ARM_DIR/UNAVAILABLE"
+  exit 2
+fi
+
 "$CTL" disconnect   >/dev/null 2>&1 || true
 "$CTL" stop-client  >/dev/null 2>&1 || true
 systemctl stop gnosisvpn
@@ -131,15 +141,65 @@ systemctl daemon-reload
 systemctl start gnosisvpn
 sleep 5
 
+# Roll the node back to whatever it had before this arm touched it. Anything
+# that leaves here must leave a WORKING node: a benchmark tool that bricks the
+# thing it measures is worse than one that refuses to run.
+rollback() {
+  echo "    rolling back to the previous configuration"
+  rm -f "$DROPIN" "$HOPR_YAML_DEST"
+  [ -f "$CONFIG_PATH.use-arm-backup" ] && cp -a "$CONFIG_PATH.use-arm-backup" "$CONFIG_PATH"
+  systemctl daemon-reload
+  systemctl restart gnosisvpn
+  sleep 5
+  if systemctl is-active --quiet gnosisvpn; then
+    echo "    service active again (generated config)"
+  else
+    echo "    ROLLBACK ALSO FAILED -- check: journalctl -u gnosisvpn -n 50"
+  fi
+}
+
 if ! systemctl is-active --quiet gnosisvpn; then
   say "SERVICE DID NOT START"
-  # Nearly always a rejected manual hopr-lib config: HoprLibConfig is
-  # deny_unknown_fields, so one wrong key stops the service rather than warning.
   journalctl -u gnosisvpn -n 30 --no-pager | grep -iE 'error|panic|config|expected' || \
     journalctl -u gnosisvpn -n 30 --no-pager
+  rollback
   exit 1
 fi
 echo "    service active"
+
+# systemd being happy is NOT the same as the config being accepted. A rejected
+# hopr-lib config does not fail the UNIT -- the worker starts, reads the file,
+# and parks in Warmup reporting the parse error in its status string. Checking
+# is-active alone passed here and left the node wedged for the five minutes the
+# route count then spent polling. So ask the client itself.
+say "verifying the client accepted the config"
+cfg_err=""
+for i in $(seq 1 12); do
+  st="$(timeout 10 "$CTL" status 2>&1 || true)"
+  case "$st" in
+    *"config error"*|*"unknown field"*|*"Output error"*|*"missing field"*)
+      cfg_err="$st"; break ;;
+    Ready*|Connected*|Idle*)
+      echo "    client reports: $(printf '%s' "$st" | head -1)"; cfg_err=""; break ;;
+  esac
+  sleep 5
+done
+
+if [ -n "$cfg_err" ]; then
+  say "THE CLIENT REJECTED THIS ARM'S CONFIG"
+  printf '%s\n' "$cfg_err" | sed 's/^/    /'
+  cat <<'EOF'
+
+    The unit is running; the worker is not. hopr-lib's config is
+    deny_unknown_fields, so a key it does not know stops it dead rather than
+    being ignored -- and "expected one of ..." in that message is the
+    authoritative list of what this BUILD accepts, which may differ from any
+    branch of the source.
+
+EOF
+  rollback
+  exit 1
+fi
 
 [ "$DO_COUNT" = 1 ] || { show; exit 0; }
 

@@ -183,19 +183,24 @@ which is node-global, so they run as their own study — see
 
 The pinning lever is worth stating plainly, because it is cheaper than the issue implies:
 
-> The service honours `GNOSISVPN_HOPR_CONFIG_PATH`. Setting it swaps the worker from a
-> *generated* hopr-lib config to one you supply — which exposes the whole `HoprLibConfig`,
-> including `protocol.path_planner`. `max_cached_paths = 1` collapses the weighted candidate
-> collection to a single validated path, so every packet's forward route and every SURB's
-> return route resolve to the same path. **That is a real pin of both legs, with no recompile
-> and no channel churn.**
+> hopr-lib's `protocol.path_planner` is `serde(skip)` and `PathPlannerConfig` derives no serde at
+> all, so it cannot be set from a hopr-lib YAML — and `deny_unknown_fields` makes the attempt a hard
+> failure rather than a no-op. It is set in code, by gnosis_vpn, and **only when it generates the
+> config**: `cfg.protocol.path_planner = edgli::latency_path_planner_config(min_ack_rate)` followed
+> by `path_planner.apply(&mut ...)`, which layers overrides from gnosis_vpn's own `config.toml`.
+> So the lever is a `[connection.path_planner]` section in `config.toml`, and
+> `GNOSISVPN_HOPR_CONFIG_PATH` is exactly backwards — it loads `HoprLibConfig` straight from disk
+> and never applies the overrides. **`max_cached_paths = 1` there is a real pin of both legs, with
+> no recompile and no channel churn.**
 
-Two gotchas `02-make-arms.sh` handles: manual mode does not inject the safe/module addresses
-(they are read from `gnosisvpn-hopr.safe`), and generated mode also tightens probe intervals to
-3 s for edge clients (replicated in the YAML, or the node warms up far more slowly).
+Every arm now runs in **generated** mode and differs only in the keys its `config.toml` sets.
+`PathPlannerOptions::apply()` leaves unset fields at the preset, so an arm is a genuine diff from
+the running configuration rather than a hand-rebuilt one — which also removes the old asymmetry
+where a manual-mode arm silently ignored this node's own `[connection.path_planner]` overrides.
 
-`HoprLibConfig` is `deny_unknown_fields`, so a typo stops the service rather than being silently
-ignored. That is a feature — but validate before a long run, not at 3am in cycle 40.
+Both config layers are `deny_unknown_fields`, so a typo stops the client rather than being silently
+ignored. That is a feature, and `use-arm.sh` now detects it and rolls back — but validate before a
+long run, not at 3am in cycle 40.
 
 ## Load source: with or without a second machine
 

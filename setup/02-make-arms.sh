@@ -21,17 +21,30 @@
 #   Templates are static. Instances are per-node and per-run. Conflating the two
 #   is how an address ends up in a public repo.
 #
-# THE KEY LEVER, and it needs no recompile:
+# THE KEY LEVER, and it needs no recompile -- but NOT where you would expect:
 #
-#   The service honours GNOSISVPN_HOPR_CONFIG_PATH. Setting it switches the
-#   worker from a generated hopr-lib config to a file you supply, which exposes
-#   the whole HoprLibConfig -- including protocol.path_planner:
+#   hopr-lib's protocol.path_planner is `#[cfg_attr(feature = "serde",
+#   serde(skip))]`, and PathPlannerConfig derives no serde at all. It is absent
+#   from the config schema, so it cannot be set from a hopr-lib YAML -- and
+#   because HoprProtocolConfig is deny_unknown_fields, trying stops the client.
 #
+#   It is set in CODE, by gnosis_vpn, and only when it GENERATES the config:
+#
+#     cfg.protocol.path_planner = edgli::latency_path_planner_config(min_ack_rate);
+#     path_planner.apply(&mut cfg.protocol.path_planner);   // user overrides
+#
+#   Those overrides come from gnosis_vpn's own config.toml, so the lever is:
+#
+#     [connection.path_planner]
 #     max_cached_paths          candidates the selector may return per query
 #     return_path_exploration   fraction of return draws made uniformly at random
 #     return_path_weight_temper exponent flattening the return-path weights
 #     min_paths_anonymity_floor candidate count below which no pruning happens
 #     latency_halflife          how hard latency is weighted
+#
+#   Setting GNOSISVPN_HOPR_CONFIG_PATH is therefore exactly backwards: the file
+#   path loads HoprLibConfig straight from disk and never applies the overrides,
+#   so it is the one mode in which the planner CANNOT be influenced at all.
 #
 #   max_cached_paths = 1 collapses the weighted candidate collection to a single
 #   entry, so forward AND return resolve to one path, per packet, deterministically.
@@ -103,7 +116,7 @@ if [ "$DO_LIST" = 1 ]; then
     n=$(basename "$d")
     printf '%-16s %-7s %-10s %-10s %s\n' \
       "$n" "$(cat "$d/hops" 2>/dev/null || echo '?')" \
-      "$([ -f "$d/planner.yaml" ] && echo yes || echo -)" \
+      "$(grep -q 'connection.path_planner' "$d/config.toml" 2>/dev/null && echo yes || echo -)" \
       "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
       "$(head -1 "$d/README" 2>/dev/null)"
   done
@@ -191,103 +204,17 @@ PY
 # with in generated mode. Every planner arm starts from these and changes only
 # what it is testing -- otherwise an arm differs from the control in more than
 # one way and isolates nothing.
-planner_preset() {
-  cat <<EOF
-max_cache_capacity: 10000
-cache_ttl: 10s
-refresh_period: 5s
-max_cached_paths: 50
-edge_penalty: 0.5
-min_paths_anonymity_floor: 0
-latency_halflife: 100ms
-capacity_reference: 10000000
-return_path_weight_temper: 0.5
-return_path_exploration: 0.1
-min_ack_rate: $MIN_ACK_RATE
-EOF
-}
+# NOTE: this script used to render a hopr-lib YAML and point the service at it
+# with GNOSISVPN_HOPR_CONFIG_PATH, to set protocol.path_planner. That could
+# never work -- the field is serde(skip) in hopr-lib, so it is absent from the
+# config schema and deny_unknown_fields turns the attempt into a hard failure.
+# Worse, the file path is the one mode where the planner CANNOT be influenced:
+# gnosis_vpn only layers user overrides onto the planner when it GENERATES the
+# config. So planner arms are now plain [connection.path_planner] sections in
+# config.toml, and every arm runs in generated mode. That also removes the old
+# preset-layering here -- the client's own PathPlannerOptions::apply() leaves
+# unset fields at the preset, which is exactly what the layering was emulating.
 
-# THE CONTROL IS NOT THE PRESET.
-#
-# In generated mode the client applies the edgli preset and THEN layers this
-# node's own [connection.path_planner] overrides on top. In manual mode -- which
-# is what every planner arm uses -- the yaml is final and those overrides are
-# ignored. So an arm that starts from the bare preset silently differs from
-# `auto` by whatever the installed config.toml overrides.
-#
-# That is not hypothetical: the client preset sets min_paths_anonymity_floor to 0
-# ("keep every candidate"), and the installer-shipped network configs set it to 3
-# ("prune to the 3 fastest"). On such a node, an arm built from the preset alone
-# would be testing its own variable AND 3 -> 50 candidates at once.
-#
-# So the overrides are read off the running config and folded in.
-read_config_planner_overrides() {
-  python3 - "$PROD_CONFIG" <<'PY'
-import re, sys
-text = open(sys.argv[1]).read()
-# The [connection.path_planner] table, up to the next table header.
-m = re.search(r'^\[connection\.path_planner\]\s*$(.*?)(?=^\[|\Z)', text, re.M | re.S)
-if not m:
-    sys.exit(0)
-for line in m.group(1).splitlines():
-    line = line.split('#', 1)[0].strip()
-    if not line or '=' not in line:
-        continue
-    key, val = (p.strip() for p in line.split('=', 1))
-    # TOML strings ("10s") become bare YAML scalars; numbers and bools pass through.
-    if len(val) >= 2 and val[0] == val[-1] and val[0] in '"\'':
-        val = val[1:-1]
-    print(f"{key}: {val}")
-PY
-}
-
-make_hopr_yaml() {  # make_hopr_yaml OUTFILE PLANNER_TEMPLATE
-  local out="$1" tmpl="$2" arm
-  arm="$(basename "$(dirname "$tmpl")")"
-  {
-    cat <<EOF
-# Manual hopr-lib config for one benchmark arm.
-# GENERATED by 02-make-arms.sh from $arm/planner.yaml -- edit the template in the
-# repo, not this file. Contains node addresses; never commit it.
-#
-# Layered, lowest first, so this arm differs from 'auto' only in what it tests:
-#   1. the edge-client preset (what generated mode starts from)
-#   2. [connection.path_planner] from $PROD_CONFIG
-#   3. this arm's own template
-safe_module:
-  safe_address: "$SAFE_ADDR"
-  module_address: "$MODULE_ADDR"
-
-protocol:
-  # Replicates what generated mode does for edge clients: probe aggressively at
-  # startup so relay observations exist before the first health check fires.
-  probe:
-    timeout: 3s
-    interval: 3s
-    recheck_threshold: 3s
-  path_planner:
-EOF
-    {
-      planner_preset
-      read_config_planner_overrides
-      sed "s/@MIN_ACK_RATE@/$MIN_ACK_RATE/g" "$tmpl"
-    } | python3 -c '
-import sys
-# Last writer wins, insertion order kept: preset, then config.toml, then the arm.
-merged = {}
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if not line.strip() or ":" not in line:
-        continue
-    k, v = line.split(":", 1)
-    merged[k.strip()] = v.strip()
-for k, v in merged.items():
-    print(f"    {k}: {v}")
-'
-  } > "$out"
-}
-
-# Render one template directory into one instance directory.
 render() {  # render TEMPLATE_DIR INSTANCE_NAME [RELAY]
   local t="$1" name="$2" relay="${3:-}"
   local d="$OUT/$name" was_onboarded=0
@@ -308,11 +235,6 @@ render() {  # render TEMPLATE_DIR INSTANCE_NAME [RELAY]
 
   make_config "$d/config.toml" "$(cat "$t/hops")"
   [ -f "$t/config.append" ] && sed "s/@RELAY@/$relay/g" "$t/config.append" >> "$d/config.toml"
-
-  if [ -f "$t/planner.yaml" ]; then
-    make_hopr_yaml "$d/hopr.yaml" "$t/planner.yaml"
-    printf 'GNOSISVPN_HOPR_CONFIG_PATH=%s\n' "$HOPR_YAML_DEST" > "$d/env"
-  fi
 
   [ -f "$t/flags" ]                && cp "$t/flags" "$d/flags"
   [ -f "$t/needs_fresh_identity" ] && touch "$d/needs_fresh_identity"
@@ -361,7 +283,7 @@ for d in "$OUT"/*/; do
   n=$(basename "$d")
   printf '%-20s %-10s %-10s %s\n' \
     "$n" \
-    "$([ -f "$d/hopr.yaml" ] && echo yes || echo -)" \
+    "$(grep -q 'connection.path_planner' "$d/config.toml" 2>/dev/null && echo yes || echo -)" \
     "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
     "$(head -1 "$d/README" 2>/dev/null)"
 done

@@ -1,4 +1,0 @@
-# ONLY what this arm tests: the 10% of return draws made uniformly at random,
-# ignoring path quality. Candidate count, pruning, tempering and latency
-# weighting all stay exactly as 'auto' has them.
-return_path_exploration: 0.0

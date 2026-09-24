@@ -122,7 +122,11 @@ for a in $ARMS; do
 done
 
 for a in $ARMS; do
-  if [ -d "$GVPN_ARMS_DIR/$a" ]; then
+  if [ -f "$GVPN_ARMS_DIR/$a/UNAVAILABLE" ]; then
+    bad "arm '$a' cannot run -- its mechanism does not exist in this build"
+    sed 's/^/        /' "$GVPN_ARMS_DIR/$a/UNAVAILABLE" | head -6
+    note "full note: $GVPN_ARMS_DIR/$a/UNAVAILABLE"
+  elif [ -d "$GVPN_ARMS_DIR/$a" ]; then
     pass "arm '$a' is rendered"
   else
     bad "arm '$a' not in $GVPN_ARMS_DIR -- run: sudo -E ./setup/02-make-arms.sh"

@@ -1,0 +1,10 @@
+
+# DELIBERATELY A COMBINATION -- the shippable middle ground, not a clean single
+# variable. Three candidates instead of the preset's cap, weights untempered so
+# the fastest is preferred more strongly, and no blind exploration. If this
+# lands near pin-planner, it is the setting worth proposing: it keeps some path
+# diversity, which pin-planner destroys entirely.
+[connection.path_planner]
+max_cached_paths = 3
+return_path_weight_temper = 1.0
+return_path_exploration = 0.0
