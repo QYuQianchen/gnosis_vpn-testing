@@ -7,14 +7,14 @@
 #   1. Find the kit root, so a script works from any working directory.
 #   2. Find the STATE directory -- the one place that holds everything the repo
 #      must never contain: raw run output, generated arms carrying safe and
-#      module addresses, faucet codes, identity backups.
+#      module addresses, identity backups.
 #   3. Load configuration: gvpn.conf, then a study file on top of it.
 #
 # WHY STATE LIVES OUTSIDE THE REPO
 #
 #   The VM's checkout is a git push target with a push-to-checkout hook. A push
 #   rewrites the worktree. Anything valuable inside it -- a 40-hour soak, the
-#   node identity, the faucet codes -- is one deploy or one `git clean -fdx`
+#   node identity, the identity backups -- is one deploy or one `git clean -fdx`
 #   away from gone. Keeping state outside means the repo can be replaced wholesale
 #   at any moment and nothing irreplaceable moves.
 #

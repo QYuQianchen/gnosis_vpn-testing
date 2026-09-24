@@ -81,7 +81,7 @@ fi
 if [ -d arms ]; then
   # The incoming tree has its own arms/ (the templates), so the rendered
   # instances cannot stay under that name. Keep them: they are the only record
-  # of what the previous runs actually used, including any .onboarded markers.
+  # of what the previous runs actually used.
   DEST="$STATE/arms-old"
   [ -e "$DEST" ] && DEST="$STATE/arms-old-$(date -u +%Y%m%d%H%M%S)"
   say "moving arms/ -> $DEST  (rendered instances, kept for reference)"

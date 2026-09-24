@@ -102,7 +102,6 @@
 #     config.toml           -> the whole arm, including [connection.path_planner]
 #     env                   -> extra systemd Environment= lines
 #     flags                 -> service flags this arm needs (informational)
-#     needs_fresh_identity  -> re-onboard before this arm's first session
 #
 # Dependencies: bash, coreutils, curl, iperf3, ping, iproute2, gnosis_vpn-ctl.
 #
@@ -189,14 +188,11 @@ DEADMAN_HARD=""
 # Faucet codes live in the state directory, not the repo: they are single-use
 # money, and a repo-relative path put them one `git clean` from gone and one
 # careless `git add -A` from published.
-CODES_FILE="${GVPN_CODES_FILE:-$GVPN_SECRETS_DIR/faucet-codes}"
-FAUCET_URL="${GVPN_FAUCET_URL:-https://cfp-funding-api-656686060169.europe-west1.run.app/api/cfp-funding-tool/airdrop}"
 
 ASSUME_MBPS="${GVPN_ASSUME_MBPS:-5}"
 CONNECT_EST="${GVPN_CONNECT_EST:-40}"
 
 DETACH=0
-ALLOW_IDENTITY_RESET="${GVPN_ALLOW_IDENTITY_RESET:-0}"
 
 # A rehearsal of THIS study rather than a different study. It keeps the arms,
 # the exits and the load source exactly as configured and shrinks only the
@@ -252,7 +248,6 @@ Setup:
   -s, --iperf-server H    iperf3 server  [required]
       --iperf-port P      (default: $IPERF_PORT)
   -o, --out DIR           (default: $OUT_ROOT)
-  -c, --codes FILE        faucet codes (default: $CODES_FILE)
       --dry-run           print the schedule and estimate, then exit
       --detach            re-exec detached; survives SSH loss
   -h, --help
@@ -346,12 +341,10 @@ while [ $# -gt 0 ]; do
     -s|--iperf-server)   IPERF_SERVER="$2"; shift 2 ;;
     --iperf-port)        IPERF_PORT="$2"; shift 2 ;;
     -o|--out)            OUT_ROOT="$2"; shift 2 ;;
-    -c|--codes)          CODES_FILE="$2"; shift 2 ;;
     --trial)             TRIAL=1; shift ;;
     --full)              TRIAL=0; shift ;;
     --dry-run)           DRY_RUN=1; shift ;;
     --detach)            DETACH=1; shift ;;
-    --allow-identity-reset) ALLOW_IDENTITY_RESET=1; shift ;;
     -h|--help)           usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -562,83 +555,6 @@ detect_identity_dir() {
   echo ""
 }
 
-# ledger CODE OUTCOME DETAIL -- an audit trail of every faucet attempt.
-#
-# `faucet-codes.used` answers "may this code be offered again?" and nothing else.
-# It cannot say whether a code bought anything, which is the question you have
-# when a run has consumed three codes and produced two identities.
-ledger() {
-  printf '%s\t%s\t%s\t%s\n' "$(stamp)" "$1" "$2" "${3:-}" >> "$CODES_LEDGER" 2>/dev/null || true
-}
-
-next_code() {
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -z "$line" ] && continue
-    case "$line" in \#*) continue ;; esac
-    grep -Fxq "$line" "$USED_CODES" 2>/dev/null || { printf '%s' "$line"; return 0; }
-  done < "$CODES_FILE"
-  return 1
-}
-
-fresh_identity_and_onboard() {  # fresh_identity_and_onboard OUTDIR
-  local out="$1" idir
-  idir="$(detect_identity_dir)"
-  [ -n "$idir" ] || { log "  cannot locate identity dir; set GVPN_IDENTITY_DIR"; return 1; }
-
-  ctl stop-client >/dev/null 2>&1
-  svc_stop >>"$RUN_LOG" 2>&1
-  sleep 2
-  mkdir -p "$out/identity-backup" && chmod 700 "$out/identity-backup"
-  cp -a "$idir"/gnosisvpn-hopr.* "$out/identity-backup"/ 2>/dev/null
-  rm -f "$idir"/gnosisvpn-hopr.id "$idir"/gnosisvpn-hopr.pass "$idir"/gnosisvpn-hopr.safe
-  svc_start >>"$RUN_LOG" 2>&1
-  wait_for "$SERVICE_TIMEOUT" "service after identity reset" bash -c "$CTL ping >/dev/null 2>&1" || return 1
-
-  ctl start-client "$KEEPALIVE" >>"$RUN_LOG" 2>&1
-  local addr="" deadline=$(( $(now) + SERVICE_TIMEOUT ))
-  while [ "$(now)" -lt "$deadline" ]; do addr="$(funding_address)"; [ -n "$addr" ] && break; sleep 3; done
-  [ -n "$addr" ] || { log "  no funding address"; return 1; }
-  log "  funding address: $addr"
-
-  local code; code="$(next_code)" || {
-    log "  no unused faucet codes left in $CODES_FILE"
-    log "  used so far: $(wc -l < "$USED_CODES" 2>/dev/null || echo 0); see $CODES_LEDGER"
-    return 1; }
-
-  local rc=0
-  curl -s --max-time 120 -X POST "$FAUCET_URL" -H 'Content-Type: application/json' \
-       -d "$(printf '{"address":"%s","code":"%s"}' "$addr" "$code")" > "$out/faucet.json" 2>&1 || rc=$?
-
-  # WHICH FAILURES BURN A CODE, AND WHICH DO NOT.
-  #
-  # A code is money: single-use, and an hour of waiting to replace. Marking one
-  # used because curl could not reach the faucet throws it away without ever
-  # spending it -- the code is still perfectly valid, but this kit will never
-  # offer it again. So a transport failure leaves the code available and fails
-  # the arm; only an actual answer from the faucet consumes it.
-  #
-  # A rejection IS consuming: the usual reason is that the code was already
-  # redeemed, and retrying it next cycle would just burn the arm again.
-  if [ "$rc" -ne 0 ] || [ ! -s "$out/faucet.json" ]; then
-    ledger "$code" transport-error "curl exit $rc, $(wc -c < "$out/faucet.json" 2>/dev/null || echo 0) bytes"
-    log "  faucet unreachable (curl exit $rc) -- code NOT consumed, still available"
-    return 1
-  fi
-  if grep -q '"success"[[:space:]]*:[[:space:]]*true' "$out/faucet.json"; then
-    printf '%s\n' "$code" >> "$USED_CODES"
-    ledger "$code" accepted "$addr"
-    log "  faucet accepted the code"
-  else
-    printf '%s\n' "$code" >> "$USED_CODES"
-    ledger "$code" rejected "$(head -c 200 "$out/faucet.json" | tr -d '\n')"
-    log "  faucet rejected the code (see $out/faucet.json) -- treated as spent"
-    return 1
-  fi
-
-  dm_arm "$ONBOARD_TIMEOUT"
-  wait_for "$ONBOARD_TIMEOUT" "node to reach Ready" is_ready
-}
 
 # ---------------------------------------------------------- session sampling --
 
@@ -920,34 +836,27 @@ describe_schedule() {
 #
 # Interleaving cannot fix this. It is the one comparison in this kit that has to
 # be its own study, against its own baseline.
-FRESH_ARMS=""
+# No shipped arm re-onboards, and none should: a new identity belongs to the
+# NODE, not to the arm, so every later session of every other arm would run on
+# it. Retargeting channels is an ordinary on-chain close (tools/close-channels.py)
+# and needs no new identity. The marker is still honoured as a refusal, because
+# a hand-made arm carrying it would otherwise destroy a funded identity.
 for _a in $ARMS; do
-  [ -f "$ARMS_DIR/$_a/needs_fresh_identity" ] && FRESH_ARMS="$FRESH_ARMS $_a"
-done
-FRESH_ARMS="${FRESH_ARMS# }"
-if [ -n "$FRESH_ARMS" ] && [ "$ARM_COUNT" -gt 1 ]; then
-  cat >&2 <<EOF
+  if [ -f "$ARMS_DIR/$_a/needs_fresh_identity" ]; then
+    cat >&2 <<EOF
+REFUSING TO RUN: arm '$_a' is marked needs_fresh_identity.
 
-REFUSING TO RUN: these arms re-onboard the node, and other arms are in the same run.
+Re-onboarding is not supported. It replaces the node's identity, which is
+node-global, so it contaminates every other arm in the run -- and it is not
+needed: close the channels you do not want instead.
 
-  re-onboarding: $FRESH_ARMS
-  also in run:   $(echo "$ARMS" | tr ' ' '\n' | grep -vxF "$(echo "$FRESH_ARMS" | tr ' ' '\n')" | tr '\n' ' ')
+  sudo -E ./tools/close-channels.py --keep 0xRELAY --send
 
-Re-onboarding replaces the node's identity and opens only the channels the
-allowlist permits. Every later session of every other arm then runs on that
-one-channel node, so the control is no longer the control -- and because the
-strategy reopens channels over time, the contamination fades gradually with
-nothing in the data to mark where it ended.
-
-Run it as its own study, with its own baseline:
-
-  GVPN_ARMS="$FRESH_ARMS"        # plus 'auto' in a SEPARATE run, after
-  --allow-identity-reset          # if you really mean to mix them anyway
-
+Remove $ARMS_DIR/$_a/needs_fresh_identity once the arm no longer expects it.
 EOF
-  [ "${ALLOW_IDENTITY_RESET:-0}" = 1 ] || exit 2
-  log "WARNING: --allow-identity-reset given; the control is contaminated from the first re-onboard"
-fi
+    exit 2
+  fi
+done
 
 # An arm carrying a PREREQUISITE has been put into a state by hand -- for
 # pin-cfg, a channel set trimmed to one relay. That state belongs to the NODE,
@@ -993,8 +902,6 @@ DEADMAN_LOG="$RUN_DIR/deadman.log"
 WATCHDOG="$RUN_DIR/watchdog.sh"
 DEADLINE_FILE="$RUN_DIR/deadline"
 SUMMARY="$RUN_DIR/summary.csv"
-USED_CODES="${GVPN_USED_CODES:-$(dirname "$CODES_FILE")/faucet-codes.used}"
-CODES_LEDGER="${GVPN_CODES_LEDGER:-$(dirname "$CODES_FILE")/faucet-codes.log}"
 touch "$CODES_LEDGER" 2>/dev/null || true
 : > "$RUN_LOG"; touch "$USED_CODES" 2>/dev/null
 
@@ -1011,7 +918,7 @@ if [ "$DETACH" = 1 ]; then
         --target "$TARGET" ${DL_URL:+--url "$DL_URL"} ${UL_URL:+--url-up "$UL_URL"} \
         ${UDP_HOST:+--udp-host "$UDP_HOST"} \
         ${IPERF_SERVER:+-s "$IPERF_SERVER"} --iperf-port "$IPERF_PORT" \
-        -o "$OUT_ROOT" -c "$CODES_FILE" \
+        -o "$OUT_ROOT" \
         ${DESTINATION:+-D "$DESTINATION"} \
         >>"$RUN_DIR/detached.log" 2>&1 </dev/null &
   echo "$RUN_DIR"; exit 0
@@ -1111,16 +1018,10 @@ run_session() {  # run_session CYCLE ARM [DEST]
   dm_arm "$SERVICE_TIMEOUT"
   apply_arm_config "$arm_dir" || { echo "$cycle,$arm,-,$d,-,$REPS,config-failed" >> "$SUMMARY"; return 1; }
 
-  if [ -f "$arm_dir/needs_fresh_identity" ] && [ ! -f "$arm_dir/.onboarded" ]; then
-    log "  arm needs a fresh identity (allowlist must precede channel opening)"
-    fresh_identity_and_onboard "$d" || { echo "$cycle,$arm,-,$d,-,$REPS,onboard-failed" >> "$SUMMARY"; return 1; }
-    touch "$arm_dir/.onboarded"
-  else
-    ctl start-client "$KEEPALIVE" >>"$RUN_LOG" 2>&1
-    dm_arm "$ONBOARD_TIMEOUT"
-    wait_for "$ONBOARD_TIMEOUT" "node Ready" is_ready \
-      || { echo "$cycle,$arm,-,$d,-,$REPS,not-ready" >> "$SUMMARY"; return 1; }
-  fi
+  ctl start-client "$KEEPALIVE" >>"$RUN_LOG" 2>&1
+  dm_arm "$ONBOARD_TIMEOUT"
+  wait_for "$ONBOARD_TIMEOUT" "node Ready" is_ready \
+    || { echo "$cycle,$arm,-,$d,-,$REPS,not-ready" >> "$SUMMARY"; return 1; }
 
   local dest="${want_dest:-$DESTINATION}"
   [ -n "$dest" ] || dest="$(list_destinations | head -1)"

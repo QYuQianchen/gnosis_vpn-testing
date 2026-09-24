@@ -82,7 +82,7 @@ Usage: sudo $0 [--destination ID] [--pin-relay 0x...]... [--out DIR]
                         (default from gvpn.conf: ${GVPN_DESTINATION:-<all>})
   --pin-relay ADDR      instantiate the _pin-cfg template against this relay.
                         Repeatable. Each needs a fresh identity, so budget one
-                        faucet code per relay.
+                        on-chain channel close per relay.
   --out DIR             where to write instances (default: $OUT)
   --templates DIR       where to read templates from (default: $TEMPLATES)
   --prod-config PATH    source config to derive from (default: $PROD_CONFIG)
@@ -117,7 +117,6 @@ if [ "$DO_LIST" = 1 ]; then
     printf '%-16s %-7s %-10s %-10s %s\n' \
       "$n" "$(cat "$d/hops" 2>/dev/null || echo '?')" \
       "$(grep -q 'connection.path_planner' "$d/config.toml" 2>/dev/null && echo yes || echo -)" \
-      "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
       "$(head -1 "$d/README" 2>/dev/null)"
   done
   exit 0
@@ -217,19 +216,10 @@ PY
 
 render() {  # render TEMPLATE_DIR INSTANCE_NAME [RELAY]
   local t="$1" name="$2" relay="${3:-}"
-  local d="$OUT/$name" was_onboarded=0
+  local d="$OUT/$name"
 
-  # PRESERVE THE ONBOARDING MARKER ACROSS A RE-RENDER.
-  #
-  # gvpn-bench.sh re-onboards -- which destroys the funded identity and spends a
-  # faucet code -- when an arm has needs_fresh_identity and no .onboarded marker.
-  # Re-rendering an arm to change a planner setting must not look like an arm
-  # that has never been funded, or `make arms` silently costs you an identity and
-  # a code on the next run.
-  [ -f "$d/.onboarded" ] && was_onboarded=1
 
   rm -rf "$d"; mkdir -p "$d"
-  [ "$was_onboarded" = 1 ] && touch "$d/.onboarded"
 
   sed "s/@RELAY@/$relay/g" "$t/README" > "$d/README"
 
@@ -237,7 +227,6 @@ render() {  # render TEMPLATE_DIR INSTANCE_NAME [RELAY]
   [ -f "$t/config.append" ] && sed "s/@RELAY@/$relay/g" "$t/config.append" >> "$d/config.toml"
 
   [ -f "$t/flags" ]                && cp "$t/flags" "$d/flags"
-  [ -f "$t/needs_fresh_identity" ] && touch "$d/needs_fresh_identity"
   # A manual step the operator must complete before this arm measures anything.
   [ -f "$t/PREREQUISITE" ] && sed "s/@RELAY@/$relay/g" "$t/PREREQUISITE" > "$d/PREREQUISITE"
   printf '%s\n' "$(basename "$t")" > "$d/.template"
@@ -284,7 +273,6 @@ for d in "$OUT"/*/; do
   printf '%-20s %-10s %-10s %s\n' \
     "$n" \
     "$(grep -q 'connection.path_planner' "$d/config.toml" 2>/dev/null && echo yes || echo -)" \
-    "$([ -f "$d/needs_fresh_identity" ] && echo yes || echo -)" \
     "$(head -1 "$d/README" 2>/dev/null)"
 done
 

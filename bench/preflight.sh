@@ -179,7 +179,7 @@ elif [ "$INSTALLED" = "$GVPN_PIN_VERSION" ]; then
   pass "client pinned at $INSTALLED"
 else
   bad "installed $INSTALLED but study pins $GVPN_PIN_VERSION"
-  note "Run: sudo ./setup/05-set-version.sh $GVPN_PIN_VERSION"
+  note "Run: sudo -E ./setup/05-set-version.sh --version $GVPN_PIN_VERSION --apply"
 fi
 
 if printf '%s\n' $ARMS | grep -qx zero-hop; then

@@ -134,9 +134,9 @@ make test && git add -A && git commit -m "kit: <what changed>" && make push
 
 # VM — only if an arm template or the hook changed
 sudo -E ./setup/02-make-arms.sh
-./setup/06-git-deploy.sh --hooks-only
+./setup/06-git-deploy.sh          # not as root
 ```
 
-Re-rendering preserves `.onboarded` markers. Read `CHANGELOG.md` first: a change
+Read `CHANGELOG.md` first: a change
 that moves a number means a study spanning it must be restarted, which is why
 every run records `kit_rev`.

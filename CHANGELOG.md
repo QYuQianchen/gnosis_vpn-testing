@@ -128,11 +128,13 @@ re-verified.
   the leg. `--pin-relay` now renders a pair, identical but for the return draw.
   The partner carries the allowlist too, or the strategy would reopen the closed
   channels during the other arm's sessions.
-- **Faucet codes are no longer burned by a failed request.** A code was retired
-  *before* checking the faucet's answer, so a timeout permanently spent one that
-  never funded anything.
-- **`.onboarded` markers survive a re-render**, which previously destroyed a
-  funded identity on the next run.
+- **Re-onboarding and the faucet-code machinery are gone** (~190 lines, plus
+  `tools/faucet-codes.sh` and `make codes`). No shipped arm re-onboarded and
+  none should: a new identity belongs to the node, not the arm, so it
+  contaminates every other arm in the run — and retargeting channels needs an
+  on-chain close, not a new identity. The `needs_fresh_identity` marker is still
+  honoured, but now as a refusal, because a hand-made arm carrying it would
+  otherwise destroy a funded identity. `.onboarded` went with it.
 - **State moved out of the worktree** (`$GVPN_STATE`, default `~/gvpn-state`);
   deploys blocked during a run via `run.lock`; the push hook refuses a worktree
   it cannot fully write (checked by absolute path — `push-to-checkout` runs with
