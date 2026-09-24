@@ -109,6 +109,7 @@ for relay in "${PIN_RELAYS[@]:-}"; do
 done
 
 echo
+gvpn_give_back "$GVPN_ARMS_DIR"
 echo "Every config above parsed and carries its arm's values. Next:"
-echo "  sudo ./bench/use-arm.sh auto --count         # must read many routes"
-echo "  sudo ./bench/use-arm.sh pin-planner --count  # must read 1"
+echo "  make count ARM=auto          # candidates > 1"
+echo "  make count ARM=pin-planner   # candidates = 1"

@@ -44,6 +44,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import random
 import re
 import statistics as st
@@ -471,6 +472,19 @@ def main():
     args = ap.parse_args()
 
     run = Path(args.run_dir)
+    # Fail before the work, and say why, if an output cannot be written: a run
+    # directory written under sudo by an older kit belongs to root.
+    for out in (args.csv, args.markdown):
+        if not out:
+            continue
+        target = Path(out)
+        probe = target if target.exists() else target.parent
+        if not os.access(probe, os.W_OK):
+            import pwd
+            owner = pwd.getpwuid(probe.stat().st_uid).pw_name
+            sys.exit(f"cannot write {target}: {probe} belongs to {owner} (the run was written "
+                     f"under sudo). Hand it back once:  sudo chown -R \"$USER\": {run.parent}")
+
     if not (run / "summary.csv").exists():
         # A run that stopped before its first session: say so, with its last words.
         tail = ""

@@ -96,6 +96,10 @@ chmod +x "$SB/bin/"*
 export PATH="$SB/bin:$PATH" GVPN_STATE="$SB/state" GVPN_CONFIG_DIR="$SB/etc" \
        GNOSISVPN_CONFIG_PATH="$SB/etc/config.toml" GVPN_SERVICE_LOG="$LOG" \
        GVPN_STUDY=2026-09-24-transfers-25mb GVPN_DESTINATION=UK
+# As on the VM: the bench runs under sudo for a user who reads the results without it.
+if id nobody >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+  export SUDO_USER=nobody; chmod 755 "$SB"
+fi
 
 fail=0
 ok()  { printf '  ok    %s\n' "$*"; }
@@ -152,8 +156,15 @@ grep -q 'unbound variable' "$SB/abort.out" && [ ! -e "$SB/state/run.lock" ] \
   && ok "an abort under set -u releases the run lock" \
   || bad "abort left the lock: $(readlink "$SB/state/run.lock" 2>/dev/null) / $(tail -1 "$SB/abort.out")"
 
-python3 "$KIT/bench/gvpn-analyze.py" "$RUN" --floor-mbps 5 >"$SB/report.out" 2>&1 \
-  && ok "report renders" || { bad "report failed"; tail -5 "$SB/report.out"; }
+# `make report` runs as the user, not root: it must be able to write into the run
+# the root-run bench produced (the first real trial's report died on EACCES).
+as_user() { if [ -n "${SUDO_USER:-}" ]; then runuser -u "$SUDO_USER" -- "$@"; else "$@"; fi; }
+[ -z "${SUDO_USER:-}" ] || [ -z "$(find "$RUN" ! -user "$SUDO_USER" | head -1)" ] \
+  && ok "the run directory is handed back to the sudo user" \
+  || bad "root-owned files left in the run: $(find "$RUN" ! -user "$SUDO_USER" | head -3 | tr '\n' ' ')"
+as_user python3 "$KIT/bench/gvpn-analyze.py" "$RUN" --floor-mbps 5 \
+    --markdown "$RUN/report.md" --csv "$RUN/sessions.csv" >"$SB/report.out" 2>&1 \
+  && ok "report renders as the user (report.md, sessions.csv)" || { bad "report failed"; tail -5 "$SB/report.out"; }
 grep -q 'TRIAL RUN' "$SB/report.out" && ok "report marks it a trial" || bad "report does not say TRIAL RUN"
 grep -q 'PIN DID NOT TAKE' "$SB/report.out" && bad "report voided a working pin" || ok "working pin is not voided"
 

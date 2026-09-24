@@ -179,12 +179,13 @@ if [ "$PIN_CURRENT" = 1 ]; then
     bad "--pin-current but no gnosisvpn package is installed"
   else
     if grep -q '^GVPN_PIN_VERSION=' "$STUDY_FILE"; then
-      sed -i "s|^GVPN_PIN_VERSION=.*|GVPN_PIN_VERSION=$INSTALLED|" "$STUDY_FILE"
+      sed -i "s|^GVPN_PIN_VERSION=.*|GVPN_PIN_VERSION=$INSTALLED|" "$STUDY_FILE"   # sed -i makes a new, root-owned file
     else
       printf '\nGVPN_PIN_VERSION=%s\n' "$INSTALLED" >> "$STUDY_FILE"
     fi
     GVPN_PIN_VERSION="$INSTALLED"
     pass "pinned the study at the installed version $INSTALLED"
+    gvpn_give_back "$STUDY_FILE"
     note "written into $STUDY_FILE -- commit it"
   fi
 fi
@@ -357,6 +358,7 @@ else
   # for the study's result.
   python3 "$KIT/bench/gvpn-analyze.py" "$TRIAL_RUN" --no-diagnostics \
           --markdown "$TRIAL_RUN/report.md" >/dev/null \
+    && gvpn_give_back "$TRIAL_RUN" \
     && pass "report renders ($TRIAL_RUN/report.md)" \
     || bad "the analyzer could not read the trial run"
 fi
@@ -403,6 +405,7 @@ else
   else
     printf '\nGVPN_FLOOR_MBPS=%s\n' "$FLOOR" >> "$STUDY_FILE"
   fi
+  gvpn_give_back "$STUDY_FILE"
   note "written into $STUDY_FILE -- commit it, so the report cites a tracked value"
   GVPN_FLOOR_MBPS="$FLOOR"
 fi

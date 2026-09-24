@@ -495,6 +495,7 @@ cleanup() {
   # say so on the report rather than in someone's memory.
   printf '{"finished":"%s","exit":%s}\n' "$(stamp)" "$rc" \
     > "$RUN_DIR/finished.json" 2>/dev/null
+  gvpn_give_back "$RUN_DIR"         # everything the run wrote as root, for `make report`
   # Release the deploy hold. Only if it still points at THIS run -- a stale lock
   # from a crashed run is the user's to clear, and silently stealing it would let
   # two benches fight over one service.
@@ -843,6 +844,7 @@ fi
 RUN_ID="${GVPN_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 RUN_DIR="$OUT_ROOT/$RUN_ID"
 mkdir -p "$RUN_DIR" || exit 1
+gvpn_give_back "$GVPN_RUNS_DIR" "$RUN_DIR"
 
 # Announce the run. The deploy hook refuses to replace the worktree while this
 # exists: push-to-checkout rewrites script files in place, and bash reads a
@@ -864,7 +866,10 @@ fi
 # Until cleanup() takes over, any exit -- including an abort under set -u, which
 # is how the first trial left a lock behind -- releases the lock. Armed before
 # the lock is taken, so there is no line in between that can fail.
-release_lock() { [ "$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" = "$RUN_DIR" ] && rm -f "$GVPN_RUN_LOCK"; }
+release_lock() {
+  gvpn_give_back "$RUN_DIR"
+  [ "$(readlink "$GVPN_RUN_LOCK" 2>/dev/null)" = "$RUN_DIR" ] && rm -f "$GVPN_RUN_LOCK"
+}
 trap release_lock EXIT
 trap 'exit 130' INT TERM
 ln -sfn "$RUN_DIR" "$GVPN_RUN_LOCK" 2>/dev/null || true

@@ -30,6 +30,15 @@ move a number or break a node — not for docs or comments.
   VM's `.git/hooks`, which a push does not update: re-run
   `./setup/06-git-deploy.sh` once to install it. `tests/run-lock-tests.sh`
   covers every state in all three copies of the test.
+- **`make report` could not write into a run: `PermissionError … sessions.csv`.**
+  The bench runs under sudo, so each run directory and everything in it was
+  root's; `make report` runs as you. `gvpn_state_init` handed the state
+  directory back only when it started, before any run existed. Now the bench
+  hands its run directory back to the sudo user when it starts and again at
+  cleanup, preflight does the same for the trial and for the study file it edits
+  (`sed -i` under sudo replaced it with a root-owned file, which would have made
+  the next push refuse), and `make arms` for the arms. The analyzer checks it can
+  write its outputs first and names the one-line fix instead of a traceback.
 - **`make report` picked the aborted trial** (`no summary.csv in …`): it chose
   the newest run directory, and a run that stops before its first session has
   none. It now picks the newest run with a `summary.csv`, and the analyzer,

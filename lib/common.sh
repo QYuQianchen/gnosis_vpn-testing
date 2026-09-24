@@ -61,12 +61,19 @@ gvpn_lock_state() {
   fi
 }
 
+# gvpn_give_back PATH... -- hand what a sudo'ed script wrote back to the user who
+# ran sudo. Otherwise a run directory is root's, and a later `make report` (not
+# root) cannot write report.md or sessions.csv into it; a study file rewritten by
+# `sed -i` under sudo is root's, and the next push refuses to replace it.
+gvpn_give_back() {
+  [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] || return 0
+  chown -hR "$SUDO_USER": "$@" 2>/dev/null || true
+}
+
 gvpn_state_init() {
   mkdir -p "$GVPN_RUNS_DIR" "$GVPN_ARMS_DIR" "$GVPN_BACKUP_DIR"
   chmod 700 "$GVPN_BACKUP_DIR" 2>/dev/null || true
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-    chown -R "$SUDO_USER" "$GVPN_STATE" 2>/dev/null || true
-  fi
+  gvpn_give_back "$GVPN_STATE"
 }
 
 # gvpn.conf holds defaults; a study file (studies/<name>.conf) overrides them.
