@@ -32,7 +32,13 @@ gvpn-8408/                      the repo — safe to force-checkout at any momen
         install-hooks.sh        wires it in as pre-commit (once per clone)
   tests/run-analyze-tests.sh    checks the report against fabricated runs
   results/<study>/              COMMITTED: report.md, summary.csv, manifest.json
-  docs/                         plan.md, deploy.md, dev-workflow.md, migration.md
+  docs/START-HERE.md            the single path from tarball to result — begin here
+       configuration.md         every value you have to provide, and why
+       upgrading.md             what to do for each new version of the kit
+       RUN-THE-TEST.md          every field to configure, and the 3 commands
+       running-all-arms.md      all six arms, as the three studies they have to be
+       runbook-now.md           the ordered path from here to a running study
+       plan.md deploy.md dev-workflow.md migration.md
 ```
 
 ```
@@ -58,6 +64,14 @@ Three consequences worth knowing before you touch anything:
   not sync hooks, and the realistic way an address reaches the repo is a log
   excerpt pasted into a doc, which no `.gitignore` can catch.
 
+**`docs/RUN-THE-TEST.md` is the configure-and-run path**: every field you provide,
+in the order you hit it, and the three commands. There is one field you type by hand.
+
+**`docs/configuration.md` lists every value you have to supply** — there are
+three secrets and about a dozen settings, and it flags the two that silently
+produce a plausible-but-meaningless result rather than failing.
+**`docs/upgrading.md` is the six-step procedure for each new kit version.**
+
 **`gvpn.conf` is the one file to edit for defaults**; a `studies/*.conf` overrides
 it for one experiment. The setup scripts source and export both, so the bench
 script inherits the same values. Flags still override everything.
@@ -71,7 +85,7 @@ optional Phase 4 patch. See `docs/deploy.md`.
 - The Contabo VM (≥ 4 vCPU, ≥ 8 GB RAM, ≥ 40 GB disk — DEBUG logging is hungry).
 - Optionally a second VPS for iperf3 — **not required**. `--target url` runs the whole
   comparison from the one VM, loss and jitter included. See "Load source" below.
-- Faucet codes, one per allowlist-pinned relay you want to test
+- Faucet codes only if you hand-build an arm that re-onboards — no shipped arm does
   (`~/gvpn-state/secrets/faucet-codes`, one per line — outside the repo).
 - Console access to the VM (Contabo VNC) as the last resort if the tunnel eats your SSH.
 
@@ -157,7 +171,15 @@ collapsed glossary so a reader does not have to ask what `p90/p10` means.
 | `no-explore` | `return_path_exploration = 0` only | the 10 % blind return draws, alone |
 | `narrow` | 3 candidates, weights untempered | whether a shippable middle ground exists |
 | `zero-hop` | `hops = 0` | upper bound — no relay in the path at all |
-| `pin-cfg-<relay>` | channel allowlist, one relay | forward leg only (contrast with `pin-planner`) |
+| `pin-cfg-<relay>` | channel allowlist + channels trimmed to one relay | forward leg pinned by topology, return leg free |
+| `pin-cfg-pinned-<relay>` | the same, plus `max_cached_paths = 1` | its partner — the gap between the two **is** the return leg |
+
+The last two are a pair and mean nothing apart: both hold the same one-channel
+topology, and they differ only in whether the return draw is collapsed too. Both
+also carry the allowlist, so the strategy cannot reopen the closed channels
+during the other arm's sessions. They need the node trimmed to one channel,
+which is node-global, so they run as their own study — see
+**`docs/running-all-arms.md`**, which sequences all six arms across three studies.
 
 The pinning lever is worth stating plainly, because it is cheaper than the issue implies:
 
@@ -210,11 +232,21 @@ sender is the far end, not this box.
 | `smoke` | 1 cycle, 1 rep, 25 MB | ~10 min | is the rig working |
 | `quick` | 3 cycles, 1 rep, 25 MB | ~35 min | is there a signal |
 | `standard` | 30 cycles, 3 reps, 60 s legs | ~15 h | the matrix |
+| `transfers` | 30 cycles, 1 rep, 25 MB each way | **~3 h** (2 arms, 1 exit) | **start here** — fixed volume, like the team's existing test |
 | `soak` | 36 h budget, 3 reps, 60 s legs | ~1.5 d | unattended, spans day and night |
 | `persistence` | 6 cycles, 5 reps × 25 MB, 5 min gaps | ~12 h | within-session stability |
 
 Every knob overrides the profile: `--profile soak --mode bytes --dl-bytes 25M --duration 48h`
-gives a two-day schedule built from 25 MB transfers.
+gives a two-day schedule built from 25 MB transfers. A `studies/*.conf` can set the same knobs
+(`GVPN_MODE`, `GVPN_CYCLES`, `GVPN_REPS`, `GVPN_DL_BYTES`, `GVPN_UL_BYTES`, `GVPN_ARMS`,
+`GVPN_DESTINATIONS`, …), so a study is fully described by its file rather than by the flags
+someone happened to type. Flags still beat the study file; the study file beats the profile.
+
+**Wall clock is `~3 min × arms × exits × cycles`** — the transfers are a minority of it. A 25 MB
+leg is ~40 s; connecting, settling and cooling down between arms cost more than the data does.
+So the 36-hour figure is `5 arms × 3 exits × 30 cycles`, not an inherent cost. Cut arms and exits
+freely; think before cutting cycles, which is the only factor that buys statistical power. See
+**`docs/running-all-arms.md`** for the ladder from 1 hour to 36.
 
 **Arms are interleaved, never blocked.** Production relay load varies by hour; running arm A for
 an hour and arm B for the next hour measures the hour, not the arm. One session per arm per cycle,
@@ -308,7 +340,10 @@ Verify #1 by hand before any long run. Keep the Contabo console reachable as the
   relays. Without them the "relays are saturated" and "relays are blocked in the runtime"
   hypotheses cannot be answered, only the path-selection ones. Say so in the report rather than
   guessing.
-- `pin-cfg-*` arms burn one faucet code each and abandon a funded safe, because the channel
-  allowlist only constrains channels while they are being opened.
+- `pin-cfg-*` arms need the node's channel set trimmed to one relay, which is node-global: while
+  trimmed, this node is not a normal client and `auto` measured on it is not `auto`.
+  `tools/close-channels.py` does the trim and `docs/running-all-arms.md` sequences it, but the
+  grace period and the strategy's own re-open make it a study of its own, not an arm you can
+  interleave.
 - One client per host: the client owns the default route and a single identity directory. Multi-
   client aggregation tests need separate network namespaces or separate VMs.

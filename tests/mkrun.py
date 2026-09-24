@@ -80,6 +80,19 @@ SCEN = {
       "auto":        dict(mbps=18, floor_p=0.20, within=0.35, loss=1.8, jit=11.0, disc=0.015, retx=800, routes=11),
       "pin-planner": dict(mbps=18, floor_p=0.19, within=0.34, loss=1.8, jit=11.0, disc=0.014, retx=790, routes=1),
     }},
+  # Five arms, five cycles: a real effect, too few sessions to see it. The
+  # arm profiles are IDENTICAL to "win", so anything this scenario gets wrong
+  # is sampling, not configuration -- which is the point being asserted.
+  "thin": {
+    "cycles": 5, "exits": {"UK": 90},
+    "exit_scale": {},
+    "arms": {
+      "auto":        dict(mbps=18, floor_p=0.30, within=0.45, loss=1.8, jit=14.0, disc=0.021, retx=900, routes=12),
+      "pin-planner": dict(mbps=17, floor_p=0.07, within=0.18, loss=1.6, jit=5.0,  disc=0.004, retx=260, routes=1),
+      "no-explore":  dict(mbps=18, floor_p=0.18, within=0.32, loss=1.7, jit=9.0,  disc=0.012, retx=600, routes=6),
+      "narrow":      dict(mbps=18, floor_p=0.12, within=0.25, loss=1.6, jit=7.0,  disc=0.008, retx=420, routes=3),
+      "zero-hop":    dict(mbps=22, floor_p=0.03, within=0.12, loss=0.9, jit=3.0,  disc=0.001, retx=90,  routes=1),
+    }},
   "broken": {
     "cycles": 6, "exits": {"UK": 90},
     "exit_scale": {},

@@ -40,7 +40,7 @@ protocol:
   path_planner:
     max_cached_paths: 1          # collapse the candidate collection to one path
     return_path_exploration: 0.0 # stop the uniform-random return draws
-    min_paths_anonymity_floor: 0
+    min_paths_anonymity_floor: 0   # preset; the shipped network configs override to 3
     return_path_weight_temper: 1.0
 ```
 
@@ -91,7 +91,7 @@ The edge client overrides the hoprd defaults (`edge-client/src/lib.rs:59`):
 | Knob | hoprd default | edge client | Effect |
 |---|---|---|---|
 | `latency_halflife` | 100 ms | 100 ms (explicit) | latency is a *soft* weight — a 100 ms path keeps half the weight of a 0 ms one |
-| `min_paths_anonymity_floor` | 8 | **0** | latency pruning **disabled**; every ack-passing relay retained, up to `max_cached_paths = 50` |
+| `min_paths_anonymity_floor` | 8 | **0** in the client preset, but **3** in the installer-shipped network configs | despite the name it is a CAP, not a minimum: `prune_for_consistency` returns everything when it is 0 or when fewer candidates were found, and otherwise prunes down to it, dropping highest-latency first and preferring distinct first relayers. Check the node's own `[connection.path_planner]` — the effective value is what `auto` runs with, and every arm now inherits it. |
 | `return_path_weight_temper` | 0.5 | 0.5 | weights flattened, deliberately spreading SURBs wider |
 | `return_path_exploration` | 0.1 | 0.1 | 10 % of return draws ignore quality entirely |
 

@@ -12,6 +12,7 @@
 #   --profile smoke        1 cycle, 1 rep, 25 MB each way      ~6 min
 #   --profile quick        3 cycles, 1 rep, 25 MB each way     ~35 min
 #   --profile standard     30 cycles, 3 reps, 60s legs         ~12 h
+#   --profile transfers    30 cycles, 1 rep, 25 MB each way     ~3 h (2 arms, 1 exit)
 #   --profile soak         36h budget, 3 reps, 60s legs        ~1.5 days
 #   --profile persistence  6 cycles, 5 reps x 25 MB, 5 min gaps
 #                          -- one session held open across repeated transfers
@@ -120,7 +121,11 @@ PROFILE="${GVPN_PROFILE:-quick}"
 # Rendered arm instances, in the state directory -- never the repo's templates,
 # which carry no addresses and are not runnable as-is.
 ARMS_DIR="$GVPN_ARMS_DIR"
-ARMS=""
+# Was flag-only, so a study file's GVPN_ARMS was read by nothing and the run
+# silently fell back to "every directory in the arms dir". After a
+# `make arms --pin-relay`, that silently includes the pin-cfg pair -- which
+# trims the node's channels and contaminates every other arm in the study.
+ARMS="${GVPN_ARMS:-}"
 CYCLES=""
 DURATION=""
 DESTINATION="${GVPN_DESTINATION:-}"
@@ -191,6 +196,15 @@ ASSUME_MBPS="${GVPN_ASSUME_MBPS:-5}"
 CONNECT_EST="${GVPN_CONNECT_EST:-40}"
 
 DETACH=0
+ALLOW_IDENTITY_RESET="${GVPN_ALLOW_IDENTITY_RESET:-0}"
+
+# A rehearsal of THIS study rather than a different study. It keeps the arms,
+# the exits and the load source exactly as configured and shrinks only the
+# amount of work, so what it exercises is the real config path: the arm yamls,
+# the interleaving, the connect/disconnect cycle, the report, the publish step.
+# A smaller --profile would exercise a DIFFERENT configuration, which is how a
+# rehearsal passes and the real run then fails on the first cycle.
+TRIAL="${GVPN_TRIAL:-0}"
 DRY_RUN=0
 
 usage() {
@@ -291,10 +305,12 @@ apply_profile() {
                  : "${REPS:=3}"; : "${REP_GAP:=20}"; : "${UDP_SECONDS:=10}" ;;
     soak)        : "${DURATION:=36h}"; : "${MODE:=time}"; : "${DL_SECONDS:=60}"; : "${UL_SECONDS:=30}"
                  : "${REPS:=3}"; : "${REP_GAP:=20}"; : "${UDP_SECONDS:=10}" ;;
+    transfers)   : "${CYCLES:=30}"; : "${MODE:=bytes}"; : "${DL_BYTES:=25M}"; : "${UL_BYTES:=25M}"
+                 : "${REPS:=1}"; : "${REP_GAP:=20}"; : "${UDP_SECONDS:=10}" ;;
     persistence) : "${CYCLES:=6}";  : "${MODE:=bytes}"; : "${DL_BYTES:=25M}"; : "${UL_BYTES:=25M}"
                  : "${REPS:=5}"; : "${REP_GAP:=5m}"; : "${UDP_SECONDS:=10}"; : "${KEEPALIVE:=120m}" ;;
     custom)      : ;;
-    *) echo "unknown profile: $1 (smoke|quick|standard|soak|persistence|custom)" >&2; exit 2 ;;
+    *) echo "unknown profile: $1 (smoke|quick|standard|transfers|soak|persistence|custom)" >&2; exit 2 ;;
   esac
 }
 
@@ -331,14 +347,44 @@ while [ $# -gt 0 ]; do
     --iperf-port)        IPERF_PORT="$2"; shift 2 ;;
     -o|--out)            OUT_ROOT="$2"; shift 2 ;;
     -c|--codes)          CODES_FILE="$2"; shift 2 ;;
+    --trial)             TRIAL=1; shift ;;
+    --full)              TRIAL=0; shift ;;
     --dry-run)           DRY_RUN=1; shift ;;
     --detach)            DETACH=1; shift ;;
+    --allow-identity-reset) ALLOW_IDENTITY_RESET=1; shift ;;
     -h|--help)           usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
+# A study is supposed to be fully described by its studies/*.conf, but the shape
+# knobs used to be flag-only, so a study that wanted 25 MB transfers had to carry
+# the flags in someone's shell history -- exactly the thing studies/ exists to
+# prevent. These fill in AFTER flag parsing and BEFORE the profile, giving
+# flag > study conf > profile.
+: "${MODE:=${GVPN_MODE:-}}"
+: "${CYCLES:=${GVPN_CYCLES:-}}"
+: "${DURATION:=${GVPN_DURATION:-}}"
+: "${DL_BYTES:=${GVPN_DL_BYTES:-}}"
+: "${UL_BYTES:=${GVPN_UL_BYTES:-}}"
+: "${DL_SECONDS:=${GVPN_DL_SECONDS:-}}"
+: "${UL_SECONDS:=${GVPN_UL_SECONDS:-}}"
+: "${REPS:=${GVPN_REPS:-}}"
+: "${REP_GAP:=${GVPN_REP_GAP:-}}"
+: "${UDP_SECONDS:=${GVPN_UDP_SECONDS:-}}"
+
 apply_profile "$PROFILE"
+
+# --trial overrides the profile rather than filling it in: the whole point is to
+# be small regardless of what the study asked for. Deliberately NOT a profile of
+# its own, so the arms, exits and load source stay exactly as the study declares.
+if [ "$TRIAL" = 1 ]; then
+  CYCLES=1; DURATION=""; REPS=1; REP_GAP=5; UDP_SECONDS=0
+  MODE=bytes; DL_BYTES=5M; UL_BYTES=5M
+  COOLDOWN=10
+  LEG_TIMEOUT="${LEG_TIMEOUT:-90}"
+fi
+
 : "${REPS:=1}"; : "${REP_GAP:=20}"; : "${UDP_SECONDS:=0}"
 
 case "$MODE" in
@@ -521,6 +567,15 @@ detect_identity_dir() {
   echo ""
 }
 
+# ledger CODE OUTCOME DETAIL -- an audit trail of every faucet attempt.
+#
+# `faucet-codes.used` answers "may this code be offered again?" and nothing else.
+# It cannot say whether a code bought anything, which is the question you have
+# when a run has consumed three codes and produced two identities.
+ledger() {
+  printf '%s\t%s\t%s\t%s\n' "$(stamp)" "$1" "$2" "${3:-}" >> "$CODES_LEDGER" 2>/dev/null || true
+}
+
 next_code() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
@@ -551,12 +606,40 @@ fresh_identity_and_onboard() {  # fresh_identity_and_onboard OUTDIR
   [ -n "$addr" ] || { log "  no funding address"; return 1; }
   log "  funding address: $addr"
 
-  local code; code="$(next_code)" || { log "  no unused faucet codes"; return 1; }
+  local code; code="$(next_code)" || {
+    log "  no unused faucet codes left in $CODES_FILE"
+    log "  used so far: $(wc -l < "$USED_CODES" 2>/dev/null || echo 0); see $CODES_LEDGER"
+    return 1; }
+
+  local rc=0
   curl -s --max-time 120 -X POST "$FAUCET_URL" -H 'Content-Type: application/json' \
-       -d "$(printf '{"address":"%s","code":"%s"}' "$addr" "$code")" > "$out/faucet.json" 2>&1
-  printf '%s\n' "$code" >> "$USED_CODES"
-  grep -q '"success"[[:space:]]*:[[:space:]]*true' "$out/faucet.json" || {
-    log "  faucet rejected the code"; return 1; }
+       -d "$(printf '{"address":"%s","code":"%s"}' "$addr" "$code")" > "$out/faucet.json" 2>&1 || rc=$?
+
+  # WHICH FAILURES BURN A CODE, AND WHICH DO NOT.
+  #
+  # A code is money: single-use, and an hour of waiting to replace. Marking one
+  # used because curl could not reach the faucet throws it away without ever
+  # spending it -- the code is still perfectly valid, but this kit will never
+  # offer it again. So a transport failure leaves the code available and fails
+  # the arm; only an actual answer from the faucet consumes it.
+  #
+  # A rejection IS consuming: the usual reason is that the code was already
+  # redeemed, and retrying it next cycle would just burn the arm again.
+  if [ "$rc" -ne 0 ] || [ ! -s "$out/faucet.json" ]; then
+    ledger "$code" transport-error "curl exit $rc, $(wc -c < "$out/faucet.json" 2>/dev/null || echo 0) bytes"
+    log "  faucet unreachable (curl exit $rc) -- code NOT consumed, still available"
+    return 1
+  fi
+  if grep -q '"success"[[:space:]]*:[[:space:]]*true' "$out/faucet.json"; then
+    printf '%s\n' "$code" >> "$USED_CODES"
+    ledger "$code" accepted "$addr"
+    log "  faucet accepted the code"
+  else
+    printf '%s\n' "$code" >> "$USED_CODES"
+    ledger "$code" rejected "$(head -c 200 "$out/faucet.json" | tr -d '\n')"
+    log "  faucet rejected the code (see $out/faucet.json) -- treated as spent"
+    return 1
+  fi
 
   dm_arm "$ONBOARD_TIMEOUT"
   wait_for "$ONBOARD_TIMEOUT" "node to reach Ready" is_ready
@@ -789,8 +872,12 @@ TOTAL_EST=$(( CYCLE_EST * CYCLES ))
 [ -n "$DEADMAN_HARD" ] || DEADMAN_HARD=$(( TOTAL_EST + 3600 ))
 
 describe_schedule() {
-  echo "profile:      $PROFILE"
-  echo "arms:         $ARMS($ARM_COUNT)"
+  if [ "$TRIAL" = 1 ]; then
+    echo "MODE:         *** TRIAL *** -- a rehearsal of this study, not a result."
+    echo "              Same arms, same exits, 1 cycle x 1 rep x 5 MB."
+  fi
+  echo "profile:      $PROFILE$([ "$TRIAL" = 1 ] && echo "  (overridden by --trial)")"
+  echo "arms:         $(echo $ARMS) ($ARM_COUNT)"
   echo "exits:        ${DESTINATIONS:-<first reported>} ($DEST_COUNT)"
   if [ "$MODE" = bytes ]; then
     echo "mode:         bytes -- down $DL_BYTES, up $UL_BYTES (estimates assume ~${ASSUME_MBPS} Mbit/s)"
@@ -819,6 +906,71 @@ describe_schedule() {
   fi
 }
 
+# A FRESH-IDENTITY ARM CANNOT SHARE A RUN WITH ANY OTHER ARM.
+#
+# An allowlist only constrains channels while they are being OPENED, so such an
+# arm re-onboards: new identity, and exactly as many channels as its allowlist
+# permits. That identity then belongs to the whole node. Every later session of
+# every OTHER arm runs on it -- so `auto` after the re-onboard is a one-channel
+# node, which is not the `auto` that ran before it and not the `auto` anyone
+# means. The strategy will open more channels back up over time, which is worse
+# than a clean break: the contamination fades gradually and nothing in the data
+# marks where it ended.
+#
+# Interleaving cannot fix this. It is the one comparison in this kit that has to
+# be its own study, against its own baseline.
+FRESH_ARMS=""
+for _a in $ARMS; do
+  [ -f "$ARMS_DIR/$_a/needs_fresh_identity" ] && FRESH_ARMS="$FRESH_ARMS $_a"
+done
+FRESH_ARMS="${FRESH_ARMS# }"
+if [ -n "$FRESH_ARMS" ] && [ "$ARM_COUNT" -gt 1 ]; then
+  cat >&2 <<EOF
+
+REFUSING TO RUN: these arms re-onboard the node, and other arms are in the same run.
+
+  re-onboarding: $FRESH_ARMS
+  also in run:   $(echo "$ARMS" | tr ' ' '\n' | grep -vxF "$(echo "$FRESH_ARMS" | tr ' ' '\n')" | tr '\n' ' ')
+
+Re-onboarding replaces the node's identity and opens only the channels the
+allowlist permits. Every later session of every other arm then runs on that
+one-channel node, so the control is no longer the control -- and because the
+strategy reopens channels over time, the contamination fades gradually with
+nothing in the data to mark where it ended.
+
+Run it as its own study, with its own baseline:
+
+  GVPN_ARMS="$FRESH_ARMS"        # plus 'auto' in a SEPARATE run, after
+  --allow-identity-reset          # if you really mean to mix them anyway
+
+EOF
+  [ "${ALLOW_IDENTITY_RESET:-0}" = 1 ] || exit 2
+  log "WARNING: --allow-identity-reset given; the control is contaminated from the first re-onboard"
+fi
+
+# An arm carrying a PREREQUISITE has been put into a state by hand -- for
+# pin-cfg, a channel set trimmed to one relay. That state belongs to the NODE,
+# not to the arm, so every other arm in the run inherits it: while you are down
+# to one channel, 'auto' is not auto. The operator did the manual step
+# deliberately, so this warns rather than refuses.
+PREREQ_ARMS=""
+for _a in $ARMS; do
+  [ -f "$ARMS_DIR/$_a/PREREQUISITE" ] && PREREQ_ARMS="$PREREQ_ARMS $_a"
+done
+PREREQ_ARMS="${PREREQ_ARMS# }"
+if [ -n "$PREREQ_ARMS" ] && [ "$ARM_COUNT" -gt 1 ]; then
+  cat >&2 <<EOF
+
+WARNING: $PREREQ_ARMS needed a manual change to this node's channel set.
+
+That change is node-global. Every other arm in this run measures a node in that
+state, so the control is not the control you would get on an untouched node.
+Prefer a separate study with its own baseline. Continuing in 10s.
+
+EOF
+  sleep 10
+fi
+
 [ "$DRY_RUN" = 1 ] && { describe_schedule; exit 0; }
 
 RUN_ID="${GVPN_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
@@ -841,12 +993,15 @@ WATCHDOG="$RUN_DIR/watchdog.sh"
 DEADLINE_FILE="$RUN_DIR/deadline"
 SUMMARY="$RUN_DIR/summary.csv"
 USED_CODES="${GVPN_USED_CODES:-$(dirname "$CODES_FILE")/faucet-codes.used}"
+CODES_LEDGER="${GVPN_CODES_LEDGER:-$(dirname "$CODES_FILE")/faucet-codes.log}"
+touch "$CODES_LEDGER" 2>/dev/null || true
 : > "$RUN_LOG"; touch "$USED_CODES" 2>/dev/null
 
 if [ "$DETACH" = 1 ]; then
   export GVPN_RUN_ID="$RUN_ID"
   command -v setsid >/dev/null 2>&1 && SETSID=setsid || SETSID=""
-  nohup $SETSID "$0" --profile custom --arms-dir "$ARMS_DIR" -a "$ARMS" -n "$CYCLES" \
+  nohup $SETSID "$0" --profile custom ${TRIAL:+$([ "$TRIAL" = 1 ] && echo --trial)} \
+        --arms-dir "$ARMS_DIR" -a "$ARMS" -n "$CYCLES" \
         --mode "$MODE" --leg-timeout "$LEG_TIMEOUT" --reps "$REPS" --rep-gap "$REP_GAP" \
         --udp-seconds "$UDP_SECONDS" --udp-rate "$UDP_RATE" \
         ${DURATION:+--duration "$DURATION"} \
@@ -883,7 +1038,7 @@ KIT_REV="$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || true)"
 git -C "$KIT" diff --quiet HEAD 2>/dev/null || KIT_REV="${KIT_REV:+$KIT_REV}-dirty"
 
 cat > "$RUN_DIR/manifest.json" <<EOF
-{"version":"$VERSION","profile":"$PROFILE","mode":"$MODE",
+{"version":"$VERSION","profile":"$PROFILE","trial":$([ "$TRIAL" = 1 ] && echo true || echo false),"mode":"$MODE",
  "client_service":"$CLIENT_SVC","client_package":"$CLIENT_PKG",
  "channel":"${GVPN_CHANNEL:-}","network":"${GVPN_NETWORK:-}","kit_rev":"$KIT_REV",
  "host_cc":"$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')",

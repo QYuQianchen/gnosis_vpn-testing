@@ -1,0 +1,6 @@
+# Same trimmed channel set as its pin-cfg partner, and the return leg pinned on
+# top. The PAIR is the experiment: both arms hold one channel, so both have one
+# forward path; only this one also collapses the return draw. The difference
+# between them is the return leg's contribution, isolated.
+max_cached_paths: 1
+return_path_exploration: 0.0

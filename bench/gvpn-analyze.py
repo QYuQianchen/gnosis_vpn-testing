@@ -450,6 +450,14 @@ def main():
     ap.add_argument("--markdown", help="write a complete issue-ready report here")
     ap.add_argument("--no-diagnostics", action="store_true",
                     help="headline and per-exit only; skip the supporting evidence")
+    # The floor threshold has to be chosen BEFORE the study runs, from a
+    # calibration run of the baseline arm alone. This prints that one number and
+    # nothing else, so preflight can write it into the study file -- reusing the
+    # same session parsing the report uses, rather than a second implementation
+    # that could disagree with it.
+    ap.add_argument("--emit-floor", action="store_true",
+                    help="print the baseline arm's p25 session median and exit; "
+                         "for calibrating GVPN_FLOOR_MBPS before a study")
     args = ap.parse_args()
 
     run = Path(args.run_dir)
@@ -509,6 +517,15 @@ def main():
             bucket(arm)["sessions"].append(s)
             rows.append(s)
 
+    if args.emit_floor:
+        base = by_arm.get(BASE, {}).get("sessions", [])
+        meds = [x["down_median"] for x in base if x.get("down_median")]
+        if len(meds) < 3:
+            sys.exit(f"only {len(meds)} usable '{BASE}' sessions; need >=3 to "
+                     f"calibrate a floor. Run more calibration cycles.")
+        print(f"{pct(meds, 25):.2f}")
+        return
+
     if not rows:
         sys.exit("no usable sessions in this run")
 
@@ -556,7 +573,17 @@ def main():
                   and stats[champion]["relays"] is not None
                   and stats[champion]["relays"] > 1.5)
 
-    if champion is None:
+    # A trial is a rehearsal of the pipeline, not a measurement of anything: one
+    # cycle of 5 MB transfers. It outranks every other verdict because the whole
+    # failure mode this guards against is a rehearsal's report being pasted
+    # somewhere as if it were the study.
+    is_trial = bool(manifest.get("trial"))
+
+    if is_trial:
+        headline = ("TRIAL RUN — a rehearsal of the pipeline, not a result. "
+                    "One cycle of small transfers; the numbers below say only "
+                    "that every arm ran through.")
+    elif champion is None:
         headline = f"Only one arm in this run — nothing to compare against '{BASE}'."
     elif pin_broken:
         headline = (f"THE PIN DID NOT TAKE — '{champion}' still drew from "
@@ -880,6 +907,11 @@ def main():
     caveats = []
     if floor_note:
         caveats.append(floor_note)
+    if is_trial:
+        caveats.append("This was a --trial run: 1 cycle, 1 rep, 5 MB transfers. "
+                       "It proves the arms load and data moves. It cannot "
+                       "support any comparison between arms — re-run without "
+                       "--trial for that.")
     if pin_broken:
         caveats.append(f"'{champion}' drew from {stats[champion]['relays']:.1f} distinct "
                        f"routes, not 1. The manual hopr-lib config is not being read — "

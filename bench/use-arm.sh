@@ -35,6 +35,8 @@ LOG="${GVPN_SERVICE_LOG:-/var/log/gnosisvpn/gnosisvpn.log}"
 DEST="${GVPN_DESTINATION:-UK}"
 CTL="${GVPN_CTL:-gnosis_vpn-ctl}"
 SETTLE="${GVPN_COUNT_SETTLE:-90}"
+READY_TIMEOUT="${GVPN_READY_TIMEOUT:-120}"
+CONNECT_TIMEOUT="${GVPN_CONNECT_TIMEOUT:-180}"
 
 ARM=""; DO_COUNT=0; DO_SHOW=0
 
@@ -116,6 +118,14 @@ else
 fi
 
 [ -f "$ARM_DIR/flags" ] && echo "    NOTE: this arm needs service flags: $(tr '\n' ' ' < "$ARM_DIR/flags")"
+if [ -f "$ARM_DIR/PREREQUISITE" ]; then
+  # Installing the config is not the same as the arm being ready. Say so here,
+  # where someone is looking, rather than leaving it to a README nobody reopens.
+  echo
+  echo "    *** THIS ARM HAS AN UNAUTOMATED PREREQUISITE ***"
+  sed 's/^/    /' "$ARM_DIR/PREREQUISITE"
+  echo "    Confirm with --count before running a study with it."
+fi
 
 systemctl daemon-reload
 systemctl start gnosisvpn
@@ -143,40 +153,118 @@ if ! grep -q 'planner=debug' /etc/systemd/system/gnosisvpn.service.d/*.conf 2>/d
   echo "    00-vm-setup.sh installs it as 10-bench-logging.conf."
 fi
 
+cat <<EOF
+    This takes a few minutes and most of it is waiting. Expect:
+      up to ${READY_TIMEOUT}s   node reaching Ready (channels, SURB warm-up)
+      up to ${CONNECT_TIMEOUT}s   session establishing to $DEST
+             ${SETTLE}s   traffic running so the planner actually draws paths
+    Each line below is one poll, so silence means something is wrong.
+
+EOF
+
+# A wedged service socket makes ctl block forever. Cap every call: a status
+# command that does not answer in 10s IS the diagnosis, not something to wait out.
+ctl_status() { timeout 10 "$CTL" -o plain status 2>/dev/null; }
+
+# Destinations are named in config.toml. Asking for one that is not there fails
+# in a way that looks exactly like a slow connect, for three silent minutes.
+if ! grep -qE "^\[destinations\.\"?${DEST}\"?\]" "$CONFIG_PATH" 2>/dev/null; then
+  echo "    '$DEST' is not a destination in $CONFIG_PATH. Available:"
+  grep -E '^\[destinations\.' "$CONFIG_PATH" 2>/dev/null | sed 's/^/      /'
+  echo "    Set GVPN_DESTINATION in gvpn.conf, or pass --dest."
+  exit 1
+fi
+
 : > "$LOG" 2>/dev/null || truncate -s 0 "$LOG"
 
+# Start from a known state. A session left up by a previous --count means the
+# node reports "Connected ..." and never "Ready", and the gate below would call
+# a perfectly healthy node broken.
+"$CTL" disconnect >/dev/null 2>&1 || true
+sleep 2
+
 "$CTL" start-client 60m >/dev/null 2>&1 || true
-for _ in $(seq 1 40); do
-  "$CTL" -o plain status 2>/dev/null | head -1 | grep -q '^Ready' && break
+last=""
+for i in $(seq 1 $((READY_TIMEOUT / 3))); do
+  st="$(ctl_status | head -1)"
+  [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' "$((i * 3))" "${st:-<no answer from the service>}"; last="$st"; }
+  # Connected also satisfies this gate: the node is past Ready, not short of it.
+  case "$st" in Ready*|Connected*) break ;; esac
   sleep 3
 done
+case "$last" in
+  Ready*|Connected*) ;;
+  *) cat <<EOF
+
+    NEVER REACHED Ready (last state: ${last:-<none>}).
+    That is a node problem, not a benchmark one. Look at:
+      gnosis_vpn-ctl info
+      sudo journalctl -u gnosisvpn -n 50 --no-pager
+    A node with no open channels, or one whose manual hopr config was rejected,
+    sits here forever.
+EOF
+     exit 1 ;;
+esac
 
 "$CTL" connect "$DEST" >/dev/null 2>&1
-for _ in $(seq 1 60); do
-  "$CTL" -o plain status 2>/dev/null | grep -q "^Connected to $DEST " && break
+last=""
+for i in $(seq 1 $((CONNECT_TIMEOUT / 3))); do
+  st="$(ctl_status | grep -E '^(Connected|Waiting|Connecting|Ready)' | head -1 || true)"
+  [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' "$((i * 3))" "${st:-<no answer>}"; last="$st"; }
+  case "$st" in "Connected to $DEST"*) break ;; esac
   sleep 3
 done
-"$CTL" -o plain status 2>/dev/null | grep -E '^(Connected|Waiting|Connecting)' || {
-  echo "    never connected to $DEST"; exit 1; }
+case "$last" in
+  "Connected to $DEST"*) ;;
+  *) echo; echo "    NEVER CONNECTED to $DEST (last state: ${last:-<none>})"
+     echo "    sudo journalctl -u gnosisvpn -n 50 --no-pager"
+     exit 1 ;;
+esac
 
-echo "    connected; letting it run ${SETTLE}s"
+echo "    connected; running traffic for ${SETTLE}s"
 # Something has to be moving for the planner to draw paths at all -- an idle
 # tunnel produces almost no candidate lines.
-( curl -s -o /dev/null --max-time "$SETTLE" \
-    "https://speed.cloudflare.com/__down?bytes=200000000" || true ) &
+TRAFFIC_URL="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
+TRAFFIC_URL="${TRAFFIC_URL//\{bytes\}/200000000}"
+( curl -s -o /dev/null --max-time "$SETTLE" "$TRAFFIC_URL" || true ) &
 sleep "$SETTLE"
 wait 2>/dev/null || true
 
-COUNT=$(grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | wc -l)
-say "RESULT: arm '$ARM' drew from $COUNT distinct route(s)"
-grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | head -20 | sed 's/^/    /'
+# `|| true` on both, and on the listing below. Under `set -euo pipefail` a grep
+# that matches nothing fails, pipefail propagates it, and set -e kills the script
+# -- silently, at exactly the moment it has something important to report. "No
+# candidate lines" is the single most useful thing this script can tell you, so
+# it must not be the one case that cannot reach the screen.
+LINES=$(grep -c 'candidate path' "$LOG" 2>/dev/null || true); LINES=${LINES:-0}
+COUNT=$(grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | wc -l || true); COUNT=${COUNT:-0}
+
+if [ "$LINES" -eq 0 ]; then
+  say "NO RESULT: the log has no 'candidate path' lines at all"
+  cat <<EOF
+    $LOG
+
+    This is NOT "one route". It means nothing was counted, because the planner
+    is not logging at DEBUG. A count of 0 and a genuine pin of 1 look alike to
+    anyone skimming, which is why this refuses to report a number.
+
+    Check the logging drop-in, then re-run:
+      grep -r planner /etc/systemd/system/gnosisvpn.service.d/
+      sudo systemctl show gnosisvpn -p Environment | tr ' ' '\n' | grep RUST_LOG
+    00-vm-setup.sh installs it as 10-bench-logging.conf.
+EOF
+  "$CTL" disconnect >/dev/null 2>&1 || true
+  exit 1
+fi
+
+say "RESULT: arm '$ARM' drew from $COUNT distinct route(s)  ($LINES candidate lines)"
+grep -o 'path=[^ ]*' "$LOG" 2>/dev/null | sort -u | head -20 | sed 's/^/    /' || true
 
 cat <<EOF
 
     Expected: pin-planner = 1, auto = many (typically 5-20).
-    Both many  -> the manual hopr config is not being read; check the drop-in.
-    Both 1     -> either the graph offers only one path (check channel count),
-                  or DEBUG logging is off and you are counting nothing.
+    Both many  -> the manual hopr config is not being read; check the drop-in at
+                  /etc/systemd/system/gnosisvpn.service.d/30-arm.conf
+    Both 1     -> the graph offers only one path; check the open channel count.
 EOF
 
 "$CTL" disconnect >/dev/null 2>&1 || true

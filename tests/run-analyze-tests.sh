@@ -35,7 +35,7 @@ check() {  # check SCENARIO PATTERN DESCRIPTION
   fi
 }
 
-for scen in win null broken; do
+for scen in win null broken thin; do
   python3 "$KIT/tests/mkrun.py" "$TMP/run-$scen" "$scen" >/dev/null
   python3 "$KIT/bench/gvpn-analyze.py" "$TMP/run-$scen" \
           --floor-mbps 5 --markdown "$TMP/$scen.md" > "$TMP/$scen.out"
@@ -47,6 +47,26 @@ check win    '1\.0'                           'pinned arm shows one route'
 check null   'NOT conclusive|No measurable'   'declines to claim a result'
 check broken 'THE PIN DID NOT TAKE'           'refuses the whole run'
 check broken 'CAVEATS'                      'lists the caveat on the console'
+# Five arms x five cycles is below the 8 samples a bootstrap CI needs, so every
+# interval comes back empty and the report must say so rather than quoting the
+# point estimates -- which at n=5 include a sign-flipped arm.
+check thin   'Too few sessions|NOT conclusive' 'declines at 5 cycles'
+check thin   'Smallest arm has 5 usable'       'names the sample size in a caveat'
+
+# A trial is a rehearsal, so its report must refuse to score the arms EVEN when
+# the data shows a huge effect -- the failure this guards against is a
+# rehearsal's report being pasted into the issue as if it were the study.
+python3 - "$TMP/run-win" <<'EOF'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1]) / "manifest.json"
+m = json.loads(p.read_text()); m["trial"] = True
+p.write_text(json.dumps(m))
+EOF
+python3 "$KIT/bench/gvpn-analyze.py" "$TMP/run-win" --floor-mbps 5 > "$TMP/trial.out"
+check trial  'TRIAL RUN'                       'refuses to score a trial run'
+grep -q 'RAISES the performance floor' "$TMP/trial.out" \
+  && { printf '  FAIL  trial    still claimed a win\n'; fail=1; } \
+  || printf '  ok    trial    suppresses the win it would otherwise report\n'
 
 grep -q 'WARNING' "$TMP/broken.md" || { printf '  FAIL  broken   markdown carries the warning\n'; fail=1; }
 grep -q 'slow 10%' "$TMP/win.md"   || { printf '  FAIL  win      markdown has the headline table\n'; fail=1; }

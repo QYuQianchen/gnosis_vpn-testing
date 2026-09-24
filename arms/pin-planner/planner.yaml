@@ -1,5 +1,10 @@
+# ONLY what this arm tests. Everything else is inherited from the edge-client
+# preset and this node's own [connection.path_planner], so the arm differs from
+# 'auto' in exactly one dimension.
+#
+# One candidate is the whole mechanism: both the per-packet forward draw and the
+# per-SURB return draw read this same collection, so collapsing it to one entry
+# pins both legs. Exploration is stated too because a reader should not have to
+# work out that drawing uniformly from a set of one is a no-op.
 max_cached_paths: 1
-min_paths_anonymity_floor: 0
 return_path_exploration: 0.0
-return_path_weight_temper: 1.0
-min_ack_rate: @MIN_ACK_RATE@
