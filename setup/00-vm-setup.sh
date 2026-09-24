@@ -179,8 +179,12 @@ if ! command -v gnosis_vpn-ctl >/dev/null 2>&1; then
       || echo "    could not install $PIN_VERSION -- see: apt-cache madison gnosisvpn" >&2
   fi
 else
-  say "Gnosis VPN already installed: $(gnosis_vpn-ctl -V 2>&1)"
-  echo "    (to switch network: curl -fsSL https://download.gnosisvpn.io/linux/install.sh | sudo bash -s -- --channel=$CHANNEL --network=$NETWORK)"
+  INSTALLED="$(dpkg-query -W -f='${Version}' gnosisvpn 2>/dev/null)"
+  say "Gnosis VPN already installed: gnosisvpn $INSTALLED"
+  if [ -n "$PIN_VERSION" ] && [ "$INSTALLED" != "$PIN_VERSION" ]; then
+    echo "    NOT the pinned version ($PIN_VERSION). Switch with:" >&2
+    echo "      sudo -E ./setup/05-set-version.sh --channel $CHANNEL --version $PIN_VERSION --apply" >&2
+  fi
 fi
 
 # A 2-day unattended run must not have the binary swapped under it.

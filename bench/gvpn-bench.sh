@@ -426,7 +426,7 @@ ctl() { run_timeout "$CTL_TIMEOUT" "$CTL" "$@"; }
 status_plain()    { ctl -o plain status 2>/dev/null; }
 is_ready()        { status_plain | head -1 | grep -q '^Ready'; }
 is_connected_to() { status_plain | grep -q "^Connected to $1 "; }
-conn_line()       { status_plain | grep -E '^(Connected to|Waiting to connect to|Connecting to|Disconnecting from) ' | head -1; }
+conn_line()       { status_plain | grep -E '^(Connected to|Waiting to connect to|Connecting to|Reconnecting to|Disconnecting from) ' | head -1; }
 is_idle()         { [ -z "$(conn_line)" ]; }
 list_destinations() { status_plain | sed -n 's/^\(.*\) (Exit: 0x[0-9a-fA-F]\{40\},.*/\1/p'; }
 funding_address() {

@@ -21,7 +21,13 @@ READY_TIMEOUT=180; CONNECT_TIMEOUT=180
 LEGACY="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf /etc/gnosisvpn/hopr-arm.yaml"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-ctl_status() { timeout 10 "$CTL" -o plain status 2>/dev/null | head -1; }
+# `status` prints the node state on line 1 and, after a `---`, the connection:
+#   Ready (Node is running) - traffic: Good, gas: Good
+#   ---
+#   Connected to UK (since 12s)        | Connecting to UK (since 3s, phase ...)
+# (gnosis_vpn-ctl/src/main.rs; strings from gnosis_vpn-lib command/mod.rs)
+ctl_raw()    { timeout 10 "$CTL" -o plain status 2>/dev/null; }
+ctl_status() { ctl_raw | head -1; }
 
 show() {
   echo "  config.toml -> $(readlink -f "$GVPN_CONFIG_PATH")"
@@ -92,20 +98,49 @@ say "counting routes for '$ARM' via $DEST  (~$((SETTLE / 60 + 3)) min, one line 
 grep -qE "^\[destinations\.\"?$DEST\"?\]" "$GVPN_CONFIG_PATH" \
   || { echo "    '$DEST' is not a destination in this config" >&2; exit 1; }
 
-wait_state() {  # wait_state TIMEOUT PATTERN ACTION...
-  local t="$1" pat="$2" last="" st; shift 2
-  "$@" >/dev/null 2>&1 || true
-  for i in $(seq 1 $((t / 3))); do
-    st="$(ctl_status)"
-    [ "$st" != "$last" ] && { printf '    [%3ds] %s\n' $((i * 3)) "${st:-<no answer>}"; last="$st"; }
-    echo "$st" | grep -qE "$pat" && return 0
-    sleep 3
-  done
-  echo "    gave up after ${t}s (last: ${last:-<none>})" >&2; return 1
+log_errors() {  # the binary's own ERROR/WARN lines since the count began
+  tail -c +"$((log_from + 1))" "$GVPN_SERVICE_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -aE ' (ERROR|WARN) ' | tail -12 | sed 's/^/      /'
 }
+
+# Poll until PATTERN matches the node or connection line. Stops early, with the
+# evidence, if the node falls back to Initializing/Warmup after having been
+# Ready: that is a node reset, and waiting it out only hides the cause.
+wait_for() {  # wait_for TIMEOUT PATTERN WATCH_RESETS
+  local t="$1" pat="$2" watch="$3" last="" raw node conn line resets=0
+  for i in $(seq 1 $((t / 3))); do
+    raw="$(ctl_raw)"                                 # ONE snapshot per poll
+    node="$(head -1 <<<"$raw")"
+    conn="$(grep -E '^(Connected|Connecting|Reconnecting|Disconnecting|Waiting to connect) ' <<<"$raw" | head -1)"
+    line="${node:-<no answer>}${conn:+  |  $conn}"
+    [ "$line" != "$last" ] && printf '    [%3ds] %s\n' $((i * 3)) "$line"
+    printf '%s\n%s\n' "$node" "$conn" | grep -qE "$pat" && return 0
+    if [ "$watch" = 1 ] && echo "$last" | grep -q '^Ready' && echo "$node" | grep -qE '^(Initializing|Warmup|Worker)'; then
+      resets=$((resets + 1))
+      if [ "$resets" -ge 2 ]; then
+        say "the node RESET $resets times after connect -- stopping"
+        echo "    Falling from Ready back to Warmup/Initializing is the client rebuilding its"
+        echo "    node, not a slow connect. Its own errors since the count began:"
+        log_errors
+        echo "    Compare: sudo ./bench/use-arm.sh auto --count   (does the control do this too?)"
+        return 1
+      fi
+    fi
+    last="$line"; sleep 3
+  done
+  echo "    gave up after ${t}s (last: ${last:-<none>})" >&2
+  log_errors
+  return 1
+}
+
 log_from=$(stat -c %s "$GVPN_SERVICE_LOG" 2>/dev/null || echo 0)
-wait_state "$READY_TIMEOUT"   '^(Ready|Connected)' "$CTL" start-client 60m || exit 1
-wait_state "$CONNECT_TIMEOUT" "^Connected to $DEST" "$CTL" connect "$DEST" || exit 1
+"$CTL" start-client 60m >/dev/null 2>&1 || true
+wait_for "$READY_TIMEOUT" '^(Ready|Connected)' 0 || exit 1
+
+# Show what connect itself says -- "Unable to connect to UK: <route health>"
+# or "Waiting to connect ... once possible" is the answer, not a detail.
+echo "    connect: $("$CTL" connect "$DEST" 2>&1 | head -2 | tr '\n' ' ')"
+wait_for "$CONNECT_TIMEOUT" "^Connected to $DEST " 1 || { "$CTL" disconnect >/dev/null 2>&1; exit 1; }
 
 echo "    connected; pulling traffic for ${SETTLE}s"
 url="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"

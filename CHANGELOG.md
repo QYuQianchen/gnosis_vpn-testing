@@ -44,6 +44,23 @@ move a number or break a node — not for docs or comments.
   packaged `gnosisvpn.env`'s `RUST_LOG=info` won. It is now an `EnvironmentFile=`
   in the drop-in, read last. Preflight checks the running process's environment.
 
+### Fixed — `use-arm.sh --count` could never see a connection
+
+- `status` prints the node state on line 1 and the connection (`Connected to UK
+  (since …)`) on a later line after `---`. The rewritten count read only line 1,
+  so every connect timed out at 180 s however well it went. It now reads both
+  from one snapshot per poll, prints what `connect` itself answered (its
+  route-health verdict on failure), and stops at the second time the node falls
+  from `Ready` back to `Warmup`/`Initializing` — a node reset — with the log's
+  own ERROR/WARN lines, instead of polling blind.
+
+### Changed
+
+- Defaults: `GVPN_CHANNEL=snapshot`, `GVPN_NETWORK=jura-prod`,
+  `GVPN_PIN_VERSION=2026.09.24+build.012613`, in `gvpn.conf` and the shipped
+  study. A study that assigns `GVPN_PIN_VERSION`, even empty, overrides
+  `gvpn.conf`. Setup now reports an installed version that differs from the pin.
+
 ### Fixed — operations
 
 - **Preflight queried the wrong package** (`gnosis-vpn-client`, not `gnosisvpn`),

@@ -40,10 +40,11 @@ execute.
 ## 2 · Prepare the node — once
 
 ```sh
-[VM] sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
+[VM] sudo ./setup/00-vm-setup.sh --allow-insecure
 ```
 
-Installs the client, the SSH-bypass policy route, planner DEBUG logging and log
+Channel, network and version come from `gvpn.conf` (`snapshot`, `jura-prod`,
+`2026.09.24+build.012613`); flags override them. Installs the client, the SSH-bypass policy route, planner DEBUG logging and log
 rotation, then starts the service. It checks the config first and stops with a
 reason if it will not load.
 
@@ -84,17 +85,20 @@ read many, the pin is not taking effect and every later number is about nothing.
 ## 4 · Run a study
 
 A study is one file in `studies/`. The one that ships — `2026-09-24-transfers-25mb`
-— is 2 arms × 1 exit × 30 cycles of 25 MB, about 3 hours. Two fields in it are
-filled in for you by the next commands; leave them empty.
+— is 2 arms × 1 exit × 30 cycles of 25 MB, about 3 hours, pinned to
+`snapshot` / `jura-prod` / `2026.09.24+build.012613`. Leave `GVPN_FLOOR_MBPS`
+empty; preflight measures it.
 
 ```sh
-[VM] sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --pin-current --trial-only
+[VM] sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --trial-only
 ```
 
-`--pin-current` records the installed version in the study file, so a mid-study
-client upgrade cannot silently turn the comparison into one between versions.
-`--trial-only` runs the whole study at 1 cycle × 5 MB and stops — same arms,
-same exits. A trial's report says `TRIAL RUN` and cannot be quoted.
+Preflight refuses to run if the installed version differs from the pinned one,
+so a mid-study upgrade cannot silently turn the comparison into one between
+versions. (`--pin-current` instead writes whatever is installed into the study —
+for starting a study on a new build.) `--trial-only` runs the whole study at
+1 cycle × 5 MB and stops — same arms, same exits. A trial's report says
+`TRIAL RUN` and cannot be quoted.
 
 ```sh
 [VM] make launch STUDY=2026-09-24-transfers-25mb
@@ -170,6 +174,8 @@ To put the network config back after an arm, without repairing anything:
 |---|---|
 | exit **66** | config failed to read or parse — see above |
 | exit **75** | another instance holds the daemon lock |
+| node falls from `Ready` back to `Warmup`/`Initializing` after `connect` | the client is rebuilding its node, not connecting slowly. `use-arm.sh` stops at the second reset and prints the log's own errors. Run `make count ARM=auto` — if the control does it too, it is not the arm |
+| `connect: Unable to connect to UK: …` / `Waiting to connect … once possible` | the text after the colon is the client's route-health verdict — that is the reason |
 | `start request repeated too quickly` | systemd gave up after 5 failures; the kit's scripts clear this themselves (`systemctl reset-failed gnosisvpn`) |
 | `service not running` from `gnosis_vpn-ctl` | the daemon is down; no `ctl` command can fix that — repair the daemon first |
 | `NO RESULT: the planner logged no candidate paths` | planner DEBUG is not active; re-run `00-vm-setup.sh`. Not the same as 1 route |
