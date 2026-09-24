@@ -6,6 +6,26 @@ move a number or break a node — not for docs or comments.
 
 ## Unreleased
 
+### Fixed — the trial aborted before its first session
+
+- **`gvpn-bench.sh: line 862: CODES_LEDGER: unbound variable`.** Removing
+  faucet codes deleted the variables but left two `touch` lines that used them;
+  under `set -u` the bench stopped before connecting anything. The bench had only
+  ever been syntax-checked.
+- **A trial could never produce a readable report.** The analyzer drops the first
+  5 s of every transfer (TCP slow start). A 5 MB trial at 20 Mbit/s is over in
+  2 s, so nothing was left and every trial read "no usable sessions". Worse, a
+  fast 25 MB session in a real study would have been dropped the same way —
+  discarding exactly the fastest sessions. A transfer too short for the window is
+  now scored by its whole-transfer rate (no tail or stall figures), and the report
+  counts such transfers in a caveat.
+- New suites: `tests/run-bench-tests.sh` runs the real `gvpn-bench.sh --trial`
+  of the shipped study with the client, systemd and network stubbed, and checks
+  the manifest, both arms' sessions, the lock, config rollback and the report.
+  `tests/run-lint-tests.sh` syntax-checks every script and lists variables used
+  without a default and never assigned (`tests/unbound.py`). Both fail on the
+  original bug.
+
 ### Fixed — arms broke the node (exit 66)
 
 - **Arms appended a duplicate `[connection.path_planner]`.** The packaged network

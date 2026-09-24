@@ -87,6 +87,22 @@ grep -q 'RAISES the performance floor' "$TMP/trial.out" \
   && { printf '  FAIL  trial    still claimed a win\n'; fail=1; } \
   || printf '  ok    trial    suppresses the win it would otherwise report\n'
 
+# A transfer that finishes inside the slow-start window must be SCORED (by its
+# whole-transfer rate), not dropped: dropping it discards exactly the fastest
+# sessions. A 5 MB trial at 20 Mbit/s is over in 2 s -- this made every trial
+# report "no usable sessions".
+python3 - "$KIT" <<'EOF' && printf '  ok    short    a 2-second transfer is scored, not dropped\n' || { printf '  FAIL  short    a 2-second transfer was dropped or misread\n'; fail=1; }
+import importlib.util, json, sys, tempfile, pathlib
+spec = importlib.util.spec_from_file_location("a", sys.argv[1] + "/bench/gvpn-analyze.py")
+a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+d = pathlib.Path(tempfile.mkdtemp())
+(d / "iperf-down.json").write_text(json.dumps({"intervals": [{"sum": {"bits_per_second": 20e6}}] * 2,
+    "end": {"sum_received": {"bytes": 5_000_000, "seconds": 2.0}}}))
+r = a.analyse_rep(d)
+sys.exit(0 if r["usable"] and r["short"] and abs(r["down_median"] - 20.0) < 1e-6
+         and r["stall_rate"] is None and r["tail_spread"] is None else 1)
+EOF
+
 grep -q 'WARNING' "$TMP/broken.md" || { printf '  FAIL  broken   markdown carries the warning\n'; fail=1; }
 grep -q 'slow 10%' "$TMP/win.md"   || { printf '  FAIL  win      markdown has the headline table\n'; fail=1; }
 

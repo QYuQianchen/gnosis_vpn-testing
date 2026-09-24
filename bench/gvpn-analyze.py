@@ -102,7 +102,7 @@ def load_iperf(path: Path):
             iv.append(bps / 1e6)
     end = data.get("end") or {}
     tot = end.get("sum_received") or end.get("sum_sent") or end.get("sum") or {}
-    return iv[SLOW_START_DROP_S:], tot.get("bytes"), tot.get("seconds")
+    return iv, tot.get("bytes"), tot.get("seconds")
 
 
 def load_udp(path: Path):
@@ -196,9 +196,24 @@ def distinct_relays(path: Path):
 
 # ---------------------------------------------------------------- per rep --
 
+def steady(iv, nbytes, secs):
+    """The 1-second samples after TCP slow start, and whether the transfer was
+    SHORT -- over before enough samples were left. A short transfer is scored by
+    its whole-transfer rate rather than dropped: dropping it would discard exactly
+    the fastest sessions and bias the comparison against the faster arm."""
+    rest = iv[SLOW_START_DROP_S:]
+    if len(rest) >= MIN_SAMPLES:
+        return rest, False
+    if nbytes and secs:
+        return [nbytes * 8 / secs / 1e6], True
+    return (iv[-1:] if iv else []), True
+
+
 def analyse_rep(rd: Path):
-    down, dbytes, dsecs = load_iperf(rd / "iperf-down.json")
-    up, _, _ = load_iperf(rd / "iperf-up.json")
+    down_iv, dbytes, dsecs = load_iperf(rd / "iperf-down.json")
+    down, short = steady(down_iv, dbytes, dsecs)
+    up_iv, ubytes, usecs = load_iperf(rd / "iperf-up.json")
+    up, _ = steady(up_iv, ubytes, usecs)
     jitter, uloss, umbps = load_udp(rd / "iperf-udp.json")
     timed_out = (rd / "iperf-down.timeout").exists() or (rd / "iperf-up.timeout").exists()
 
@@ -211,12 +226,13 @@ def analyse_rep(rd: Path):
     return {
         "rep_dir": str(rd),
         "usable": True,
+        "short": short,
         "timed_out": timed_out,
         "down_median": m,
         "down_p10": p10,
         "down_p90": p90,
         "tail_spread": (p90 / p10) if (p10 and p10 > 0) else None,
-        "stall_rate": (sum(1 for v in down if v < 0.1 * m) / len(down)) if m > 0 else None,
+        "stall_rate": (sum(1 for v in down if v < 0.1 * m) / len(down)) if (m > 0 and not short) else None,
         "down_seconds": dsecs,
         "down_bytes": dbytes,
         "up_median": st.median(up) if up else None,
@@ -247,6 +263,7 @@ def analyse_session(sdir: Path):
         "reps": reps,
         "n_reps": len(usable),
         "timed_out_reps": sum(1 for r in reps if r.get("timed_out")),
+        "short_reps": sum(1 for r in usable if r.get("short")),
         "down_median": st.median(meds),          # the session's throughput
         "within_cv": cv(meds),                   # stability across its own reps
         "rep_medians": meds,
@@ -926,6 +943,12 @@ def main():
     if n_min < 30:
         caveats.append(f"Smallest arm has {n_min} usable sessions. Tail statistics are not "
                        f"trustworthy below ~30 — signal check, not a result.")
+    n_short = sum(r.get("short_reps", 0) for r in rows)
+    if n_short and not is_trial:
+        caveats.append(f"{n_short} transfer(s) finished within the {SLOW_START_DROP_S} s "
+                       f"slow-start window; each is scored by its whole-transfer rate "
+                       f"and has no tail or stall figures. Many of these means the "
+                       f"transfers are too small for this link — raise GVPN_DL_BYTES in the study.")
     tot_fail = sum(g["failed"] for g in by_arm.values())
     if tot_fail > len(rows) * 0.1:
         caveats.append(f"{tot_fail} sessions failed or produced no data "

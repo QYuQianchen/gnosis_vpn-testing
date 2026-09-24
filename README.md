@@ -64,7 +64,8 @@ tools/diagnose.sh          why the service will not start (read-only)
       close-channels.py    trim channels via the Safe, through blokli (study 2)
       backup-identity.sh   encrypted identity backup
       scan-secrets.sh, install-hooks.sh, fix-worktree-ownership.sh
-tests/                     make test: config, node lifecycle, routing, analyzer, scanner
+tests/                     make test: lint, config, node lifecycle, routing, routes, a sandboxed
+                           bench --trial, analyzer, scanner
 ```
 
 Two things live **outside** the repo, in `~/gvpn-state/`: run output and rendered

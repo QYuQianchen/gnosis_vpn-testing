@@ -523,7 +523,7 @@ apply_arm_config() {  # apply_arm_config ARM_DIR
 }
 
 detect_identity_dir() {
-  if [ -n "${GVPN_IDENTITY_DIR:-}" ]; then echo "$GVPN_IDENTITY_DIR"; return; fi
+  if [ -n "${GVPN_IDENTITY_DIR:-}" ]; then echo "${GVPN_IDENTITY_DIR:-}"; return; fi
   local d
   for d in /var/lib/gnosisvpn/.config "$HOME/.config/gnosisvpn"; do
     [ -d "$d" ] && { echo "$d"; return; }
@@ -859,8 +859,7 @@ DEADMAN_LOG="$RUN_DIR/deadman.log"
 WATCHDOG="$RUN_DIR/watchdog.sh"
 DEADLINE_FILE="$RUN_DIR/deadline"
 SUMMARY="$RUN_DIR/summary.csv"
-touch "$CODES_LEDGER" 2>/dev/null || true
-: > "$RUN_LOG"; touch "$USED_CODES" 2>/dev/null
+: > "$RUN_LOG"
 
 if [ "$DETACH" = 1 ]; then
   export GVPN_RUN_ID="$RUN_ID"

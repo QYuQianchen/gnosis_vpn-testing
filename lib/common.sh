@@ -47,10 +47,11 @@ gvpn_load_conf() {
   [ -r "$conf" ] && { set -a; . "$conf"; set +a; GVPN_CONF_LOADED="$conf"; }
   if [ -n "${GVPN_STUDY:-}" ]; then
     local s
-    for s in "$GVPN_STUDY" "$GVPN_KIT/studies/$GVPN_STUDY" "$GVPN_KIT/studies/$GVPN_STUDY.conf"; do
+    local study="${GVPN_STUDY:-}"
+    for s in "$study" "$GVPN_KIT/studies/$study" "$GVPN_KIT/studies/$study.conf"; do
       [ -r "$s" ] && break
     done
-    [ -r "$s" ] || { echo "study not found: $GVPN_STUDY" >&2; return 1; }
+    [ -r "$s" ] || { echo "study not found: $study" >&2; return 1; }
     set -a; . "$s"; set +a
     GVPN_STUDY_LOADED="$s"; GVPN_STUDY_NAME="$(basename "$s" .conf)"
   fi
