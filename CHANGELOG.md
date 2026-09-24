@@ -87,6 +87,21 @@ re-verified.
 
 ### Operations
 
+- **The kit created the file that blocked its own deploys.**
+  `00-vm-setup.sh` wrote `BUILD.txt` into the worktree, and it runs under
+  `sudo`, so the file landed root-owned. Being gitignored, `git status` never
+  showed it — the first symptom was a push refused for an unwritable worktree,
+  with the hook naming a file nobody had touched. It now goes to
+  `$GVPN_STATE/BUILD.txt` and the stale copy is removed on setup;
+  `05-set-version.sh` reads the new location and falls back to the old one.
+  Preflight also warns about a non-deployable worktree, so this surfaces before
+  a commit rather than after one.
+- **The deploy hook printed a recipe for a problem it had not found** — a canned
+  `mv arms` / `mv bench-runs` list regardless of what tripped it, plus a link to
+  a doc that no longer exists. It now explains why git cannot proceed and points
+  at `tools/fix-worktree-ownership.sh --apply`, which handles every case
+  including a single stray file.
+
 - **`bench/preflight.sh`** (`make preflight` / `make launch`) — static checks,
   a route count per arm, the trial, floor calibration, then a detached launch;
   each stage gates the next. Two checks are refusals rather than warnings: a

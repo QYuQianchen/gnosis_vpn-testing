@@ -36,7 +36,11 @@ CONFIG_FILE="${GVPN_CONFIG:-$(cd "$(dirname "$0")/.." && pwd)/gvpn.conf}"
 CHANNEL="${GVPN_CHANNEL:-stable}"
 NETWORK="${GVPN_NETWORK:-jura-prod}"
 PIN_VERSION="${GVPN_PIN_VERSION:-}"
-BUILD_FILE="$(cd "$(dirname "$0")/.." && pwd)/BUILD.txt"
+BUILD_FILE="$GVPN_STATE/BUILD.txt"
+# Legacy: older kits wrote this into the worktree, where a sudo run left it
+# root-owned and blocked deploys. Read the old one if the new one is absent.
+LEGACY_BUILD_FILE="$(cd "$(dirname "$0")/.." && pwd)/BUILD.txt"
+[ -r "$BUILD_FILE" ] || [ ! -r "$LEGACY_BUILD_FILE" ] || BUILD_FILE="$LEGACY_BUILD_FILE"
 ACTION=show
 
 usage() {

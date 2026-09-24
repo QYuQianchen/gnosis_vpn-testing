@@ -339,7 +339,11 @@ systemctl is-active gnosisvpn && gnosis_vpn-ctl -V 2>&1 || true
   gnosis_vpn-ctl -V 2>&1
   echo "channel: $CHANNEL  network: $NETWORK  pin: ${PIN_VERSION:-<newest>}"
   dpkg-query -W -f='package: ${Package} ${Version}\n' gnosisvpn 2>/dev/null
-} > "$(dirname "$0")/../BUILD.txt" 2>/dev/null || true
+} > "$GVPN_STATE/BUILD.txt" 2>/dev/null || true
+# NOT the worktree. This script runs under sudo, so a file written there lands
+# root-owned, and because BUILD.txt is gitignored `git status` never shows it --
+# the first symptom is the next deploy being refused for an unwritable worktree.
+rm -f "$(dirname "$0")/../BUILD.txt" 2>/dev/null || true
 echo
 echo "config:       /etc/gnosisvpn/config.toml"
 echo "identity dir: /var/lib/gnosisvpn/.config"

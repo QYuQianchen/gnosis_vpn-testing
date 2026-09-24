@@ -218,6 +218,21 @@ else
   pass "disk space ok (${FREE_GB:-?}G free)"
 fi
 
+# Catch a blocked deploy here rather than at the next `make push`, where it
+# surfaces as a rejected push after you have already committed. The expected
+# owner is whoever owns .git, not $USER -- this script runs under sudo.
+if [ -d "$KIT/.git" ]; then
+  owner="$(stat -c '%U' "$KIT/.git" 2>/dev/null || echo "")"
+  foreign="$(find "$KIT" -path "$KIT/.git" -prune -o ! -user "$owner" -print 2>/dev/null | head -5)"
+  if [ -n "$foreign" ] && [ -n "$owner" ]; then
+    warn "paths in the worktree are not owned by $owner -- the next deploy will be refused"
+    printf '%s\n' "$foreign" | sed 's/^/        /'
+    note "fix: $KIT/tools/fix-worktree-ownership.sh --apply"
+  else
+    pass "worktree is deployable (all paths owned by ${owner:-?})"
+  fi
+fi
+
 if [ -e "$GVPN_RUN_LOCK" ]; then
   bad "a run is already in progress ($GVPN_RUN_LOCK -> $(readlink -f "$GVPN_RUN_LOCK" 2>/dev/null))"
   note "make status ; remove the lock only if it is stale."

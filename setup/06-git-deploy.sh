@@ -155,11 +155,15 @@ bad="\$(find "$WORKTREE" -path "$WORKTREE/.git" -prune -o ! -user "\$me" -print 
 if [ -n "\$bad" ]; then
   echo "  !! REFUSING TO DEPLOY: paths in the worktree are not owned by \$me:" >&2
   echo "\$bad" | sed 's/^/       /' >&2
-  echo "     These are leftovers from a sudo run. Move them into the state" >&2
-  echo "     directory -- they do not belong in the worktree (docs/run.md):" >&2
-  echo "       sudo mv arms ~/gvpn-state/arms-old" >&2
-  echo "       sudo mv bench-runs/* ~/gvpn-state/runs/ && sudo rmdir bench-runs" >&2
-  echo "       sudo chown -R \$me: ~/gvpn-state" >&2
+  echo "     Leftovers from a sudo run: git cannot rewrite a path it does not" >&2
+  echo "     own, and read-tree is not atomic, so it would stop halfway and" >&2
+  echo "     leave the worktree half-deployed. On the VM:" >&2
+  echo "" >&2
+  echo "       cd $WORKTREE && ./tools/fix-worktree-ownership.sh --apply" >&2
+  echo "" >&2
+  echo "     That moves run output and rendered arms into the state directory" >&2
+  echo "     and takes ownership of anything else. Run it without --apply first" >&2
+  echo "     to see what it would do." >&2
   exit 1
 fi
 git update-index -q --refresh
