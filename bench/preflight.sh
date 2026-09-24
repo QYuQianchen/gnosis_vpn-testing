@@ -231,8 +231,19 @@ if ip rule show 2>/dev/null | grep -q 200 && [ -n "$(ip route show table 200 2>/
   pass "policy route present and table 200 is non-empty"
 else
   bad "policy route missing or table 200 is empty -- a connect may take your SSH"
-  note "ip rule show | grep 200 ; ip route show table 200   (BOTH must be non-empty)"
+  note "fix: sudo ./setup/00-vm-setup.sh   (it now reports why the route failed)"
   note "Keep the Contabo console open before going further."
+fi
+
+# The client's static routing adds per-peer "/32 via <gateway>" routes without
+# onlink. If the kernel refuses them (gateway not on-link), every connect fails
+# in EstablishWgTunnel and the worker restarts -- seen on a real node as the
+# status falling from Ready back to Warmup/Initializing.
+if gvpn_gateway_ok; then
+  pass "the kernel accepts routes via the default gateway (client bypass routes will work)"
+else
+  bad "the kernel refuses routes via the default gateway: every connect would fail"
+  note "the gateway is not on-link. fix: sudo ./setup/00-vm-setup.sh (adds a link route for it)"
 fi
 
 FREE_GB=$(df -BG --output=avail "$GVPN_STATE" 2>/dev/null | tail -1 | tr -dc '0-9')

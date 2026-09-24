@@ -51,6 +51,18 @@ else
     | while read -r f; do grep -H '^RUST_LOG=' "$f" 2>/dev/null; done
 fi
 
+h "routing"
+ip -4 -o addr show scope global | awk '{print "address:", $2, $4}'
+echo "main table:"; ip -4 route show table main | sed 's/^/  /'
+echo "table 200 (SSH bypass):"; ip -4 route show table 200 2>/dev/null | sed 's/^/  /' | grep . || echo "  <EMPTY -- SSH is not protected>"
+echo "rules:"; ip rule show | sed 's/^/  /'
+if gvpn_gateway_ok; then
+  echo "gateway probe: the kernel accepts '/32 via <gateway>' -- client bypass routes will work"
+else
+  echo "gateway probe: the kernel REFUSES '/32 via <gateway>' (not on-link) -- every connect fails"
+  echo "               fix: sudo ./setup/00-vm-setup.sh"
+fi
+
 h "identity"
 ls -la /var/lib/gnosisvpn/.config 2>&1 | redact
 

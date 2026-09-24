@@ -98,9 +98,15 @@ say "counting routes for '$ARM' via $DEST  (~$((SETTLE / 60 + 3)) min, one line 
 grep -qE "^\[destinations\.\"?$DEST\"?\]" "$GVPN_CONFIG_PATH" \
   || { echo "    '$DEST' is not a destination in this config" >&2; exit 1; }
 
-log_errors() {  # the binary's own ERROR/WARN lines since the count began
-  tail -c +"$((log_from + 1))" "$GVPN_SERVICE_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
-    | grep -aE ' (ERROR|WARN) ' | tail -12 | sed 's/^/      /'
+log_errors() {  # the binary's own ERROR/WARN lines since the count began, plus known causes
+  local new; new="$(tail -c +"$((log_from + 1))" "$GVPN_SERVICE_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+  printf '%s\n' "$new" | grep -aE ' (ERROR|WARN) ' | tail -12 | sed 's/^/      /'
+  if printf '%s\n' "$new" | grep -q 'rtnetlink.*Network unreachable (os error 101)'; then
+    echo
+    echo "    KNOWN CAUSE: the kernel refused the client's bypass route via the default"
+    echo "    gateway (ENETUNREACH) -- the gateway is not on-link, so tunnel setup fails"
+    echo "    and the worker restarts. Not the arm. Fix: sudo ./setup/00-vm-setup.sh"
+  fi
 }
 
 # Poll until PATTERN matches the node or connection line. Stops early, with the
@@ -140,7 +146,7 @@ wait_for "$READY_TIMEOUT" '^(Ready|Connected)' 0 || exit 1
 # Show what connect itself says -- "Unable to connect to UK: <route health>"
 # or "Waiting to connect ... once possible" is the answer, not a detail.
 echo "    connect: $("$CTL" connect "$DEST" 2>&1 | head -2 | tr '\n' ' ')"
-wait_for "$CONNECT_TIMEOUT" "^Connected to $DEST " 1 || { "$CTL" disconnect >/dev/null 2>&1; exit 1; }
+wait_for "$CONNECT_TIMEOUT" "^Connected to $DEST " 1 || { "$CTL" disconnect >/dev/null 2>&1 || true; exit 1; }
 
 echo "    connected; pulling traffic for ${SETTLE}s"
 url="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"

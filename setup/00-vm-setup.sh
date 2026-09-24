@@ -203,13 +203,23 @@ install_ssh_bypass() {
   ifc=$(ip -4 route show default | awk '/default/{print $5; exit}')
   gw=$(ip -4 route show default | awk '/default/{print $3; exit}')
   ip4=$(ip -4 -o addr show dev "$ifc" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)
-  [ -n "$ifc" ] && [ -n "$gw" ] && [ -n "$ip4" ] || { echo "could not detect default route; skipping"; return 1; }
+  [ -n "$ifc" ] && [ -n "$gw" ] && [ -n "$ip4" ] || { echo "    could not detect the default route" >&2; return 1; }
 
+  # Runs at every boot. `set -e`: a route that fails must fail the unit, not
+  # leave a bypass that looks installed and protects nothing.
   cat > /usr/local/sbin/gvpn-ssh-bypass.sh <<EOF
 #!/bin/sh
 # Keep traffic sourced from the VM's public IP off the VPN tunnel, so inbound
 # SSH survives while the tunnel is up. Test VM only -- this traffic is NOT private.
+set -e
 IF=$ifc; GW=$gw; IP=$ip4; TBL=200
+# The gateway must be reachable at LINK scope. Hosts whose gateway lies outside
+# the interface's subnet (e.g. a /32 address, default route "onlink") reach it
+# only through that flag, and the kernel then refuses every other "via \$GW"
+# route with ENETUNREACH -- this bypass, and the VPN client's own per-peer
+# bypass routes, which it adds without onlink. A link-scope host route for the
+# gateway makes it directly reachable, as it already is in practice.
+ip route replace \$GW/32 dev \$IF scope link proto static
 ip rule del from \$IP table \$TBL 2>/dev/null || true
 ip rule add from \$IP table \$TBL priority 100
 ip route replace default via \$GW dev \$IF table \$TBL
@@ -221,6 +231,7 @@ EOF
 Description=Keep SSH reachable while the Gnosis VPN tunnel is up (test VM only)
 After=network-online.target
 Wants=network-online.target
+Before=gnosisvpn.service
 
 [Service]
 Type=oneshot
@@ -231,8 +242,18 @@ ExecStart=/usr/local/sbin/gvpn-ssh-bypass.sh
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now gvpn-ssh-bypass.service
+  systemctl enable gvpn-ssh-bypass.service >/dev/null 2>&1
+  # restart, not `enable --now`: --now does not re-run an already-active oneshot,
+  # so a changed script would never be applied.
+  systemctl restart gvpn-ssh-bypass.service || {
+    echo "    bypass unit FAILED:" >&2
+    journalctl -u gvpn-ssh-bypass -n 5 --no-pager -o cat | sed 's/^/      /' >&2
+    return 1; }
+  ip -4 route show table 200 | grep -q '^default' && ip rule show | grep -q "from $ip4 lookup 200" \
+    || { echo "    bypass unit ran but table 200 / the rule is missing" >&2; return 1; }
+  gvpn_gateway_ok || { echo "    the kernel still refuses routes via $gw -- see docs/run.md" >&2; return 1; }
   echo "    policy route installed: from $ip4 -> table 200 via $gw dev $ifc"
+  echo "    gateway $gw is reachable at link scope, so the client's bypass routes will be accepted"
   echo "    VERIFY IT before starting a long run:"
   echo "      1. gnosis_vpn-ctl connect <destination>"
   echo "      2. from another machine: ssh root@$ip4 'echo still-here'"
@@ -242,7 +263,11 @@ EOF
 
 if [ "$SKIP_SSH_BYPASS" = 0 ]; then
   say "installing the SSH bypass policy route"
-  install_ssh_bypass || true
+  install_ssh_bypass || {
+    echo "    SSH BYPASS NOT INSTALLED. Do not connect the VPN: a working tunnel takes" >&2
+    echo "    the default route, and with it your SSH session. Fix the error above, or" >&2
+    echo "    pass --skip-ssh-bypass if you have console access and accept that." >&2
+    exit 1; }
 else
   say "skipping SSH bypass (--skip-ssh-bypass)"
   echo "    the dead-man switch in gvpn-bench.sh is then your ONLY way back in."

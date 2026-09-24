@@ -44,6 +44,28 @@ move a number or break a node — not for docs or comments.
   packaged `gnosisvpn.env`'s `RUST_LOG=info` won. It is now an `EnvironmentFile=`
   in the drop-in, read last. Preflight checks the running process's environment.
 
+### Fixed — every connect failed on hosts with an off-link gateway
+
+- On this VM the default route reaches its gateway only via `onlink`. In static
+  routing the client first adds per-peer bypass routes, `<peer>/32 via <gateway>`,
+  **without** `onlink`; the kernel's nexthop check refuses them with ENETUNREACH
+  (decoded from the rejected netlink message in the client's log: RTM_NEWROUTE,
+  `rtm_flags = 0`). Tunnel setup fails in `EstablishWgTunnel`, the worker exits,
+  and the root restarts it — the node falls from `Ready` back to `Initializing`.
+  `auto` does it too; it is not the arm.
+- The kit's own SSH-bypass route failed the same way, and `install_ssh_bypass
+  || true` disabled `set -e` for the whole function, so setup printed "policy
+  route installed" over a missing route. SSH was never protected.
+- The bypass script now adds `<gateway>/32 dev <wan> scope link` first, runs
+  under `set -e`, is re-applied with `restart` (not `enable --now`, which does not
+  re-run an active oneshot), and is verified; a failure stops setup.
+  `gvpn_gateway_ok` sends the client's kind of request for a TEST-NET-3 address;
+  setup, preflight and diagnose use it. `use-arm.sh` names the cause when the log
+  shows it. `tests/run-routing-tests.sh` replays the request in a network
+  namespace and asserts both the failure and the fix.
+- Upstream: the client should copy the WAN route's `onlink` flag (or add a link
+  route for the gateway) when it builds bypass routes.
+
 ### Fixed — `use-arm.sh --count` could never see a connection
 
 - `status` prints the node state on line 1 and the connection (`Connected to UK

@@ -44,8 +44,10 @@ execute.
 ```
 
 Channel, network and version come from `gvpn.conf` (`snapshot`, `jura-prod`,
-`2026.09.24+build.012613`); flags override them. Installs the client, the SSH-bypass policy route, planner DEBUG logging and log
-rotation, then starts the service. It checks the config first and stops with a
+`2026.09.24+build.012613`); flags override them. Installs the client, the SSH-bypass policy route (plus a link-scope route for
+the gateway, which some hosts need — see Repair), planner DEBUG logging and log
+rotation, then starts the service. If the bypass cannot be installed, setup
+stops: a working tunnel would take your SSH with it. It checks the config first and stops with a
 reason if it will not load.
 
 ```sh
@@ -174,6 +176,7 @@ To put the network config back after an arm, without repairing anything:
 |---|---|
 | exit **66** | config failed to read or parse — see above |
 | exit **75** | another instance holds the daemon lock |
+| log: `static routing setup error … Network unreachable (os error 101)` | the gateway is **not on-link** (default route uses `onlink`). The client adds its peer bypass routes via the gateway without `onlink`, the kernel refuses them, tunnel setup fails, the worker restarts. Re-run `00-vm-setup.sh` — it adds `<gateway>/32 dev <wan> scope link`, which makes the gateway directly reachable. `tests/run-routing-tests.sh` reproduces this |
 | node falls from `Ready` back to `Warmup`/`Initializing` after `connect` | the client is rebuilding its node, not connecting slowly. `use-arm.sh` stops at the second reset and prints the log's own errors. Run `make count ARM=auto` — if the control does it too, it is not the arm |
 | `connect: Unable to connect to UK: …` / `Waiting to connect … once possible` | the text after the colon is the client's route-health verdict — that is the reason |
 | `start request repeated too quickly` | systemd gave up after 5 failures; the kit's scripts clear this themselves (`systemctl reset-failed gnosisvpn`) |

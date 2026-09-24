@@ -114,4 +114,22 @@ gvpn_service_why() {
   grep -a 'unable to read initial configuration' "$GVPN_SERVICE_LOG" 2>/dev/null | tail -1
 }
 
+# Would the kernel accept the VPN client's bypass routes? In static routing the
+# client adds "<peer>/32 via <gateway> dev <wan>" WITHOUT onlink; if the gateway
+# is not reachable at link scope the kernel answers ENETUNREACH, the tunnel setup
+# fails and the worker restarts. This sends the same kind of request for a
+# TEST-NET-3 address (RFC 5737, never routed) and removes it again.
+gvpn_gateway_ok() {
+  local ifc gw probe=203.0.113.254
+  ifc=$(ip -4 route show default | awk '/default/{print $5; exit}')
+  gw=$(ip -4 route show default | awk '/default/{print $3; exit}')
+  [ -n "$ifc" ] && [ -n "$gw" ] || return 1
+  ip route del "$probe/32" 2>/dev/null || true
+  if ip route add "$probe/32" via "$gw" dev "$ifc" proto static 2>/dev/null; then
+    ip route del "$probe/32" via "$gw" dev "$ifc" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
 gvpn_load_conf || true
