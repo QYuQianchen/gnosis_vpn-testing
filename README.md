@@ -78,7 +78,7 @@ never written to. Rollback re-points it back, and every run ends that way.
 ## Reading a result
 
 The report opens with a verdict and four numbers. Before quoting it: the pinned
-arm's `distinct routes` must be 1 (the report voids itself otherwise); bracketed
+arm's `candidate paths` must be 1 (the report voids itself otherwise); bracketed
 ranges are 90 % bootstrap CIs, and one spanning zero means no difference at that
 sample size; the headline is the **floor rate and slow 10 %**, not the median.
 

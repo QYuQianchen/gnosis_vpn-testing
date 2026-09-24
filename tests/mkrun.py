@@ -59,18 +59,22 @@ def make(root, scenario):
                     f"hopr_session_frame_discarded_total {disc}\n"
                     f"hopr_session_ack_outgoing_retransmission_requests_total {prof['retx']}\n")
                 nroutes = prof["routes"]
-                # The planner's real shape: the route's Display form contains
-                # spaces, and cost/weight fields that vary per line follow it.
-                # A parser that runs `path=` to the next comma counts a pinned
-                # arm as many routes -- this fixture exists to catch that.
+                # The planner's real shape (lib/routes.py): one line per
+                # candidate per cache rebuild, probabilities summing to 1, and
+                # the route's Display form containing spaces. The path set
+                # CHURNS across rebuilds -- a pinned arm still switches path at
+                # a refresh -- so an analyzer that counted distinct paths over
+                # the session would call a working pin broken. This catches it.
                 log = []
                 for j in range(12):
-                    r = j % nroutes
-                    log.append(f"DEBUG hopr_transport::path::planner: weighted candidate path "
-                               f"kind=\"forward\" hops=1 path=0x{r:02x}aa -> 0xdd "
-                               f"cost={rnd.random():.3f} composite_weight={rnd.random():.3f}")
-                log.append(f"DEBUG hopr_transport::path::planner: drawing return paths from "
-                           f"tempered weights count=4 candidates={nroutes} distinct_relayers={nroutes}")
+                    for k in range(nroutes):
+                        route = (j // 3 + k) % (nroutes + 3)
+                        log.append(f"DEBUG hopr_transport::path::planner: weighted candidate path "
+                                   f"kind=\"background-refresh\" destination=0xdd hops=1 "
+                                   f"path=0x{route:02x}aa -> 0xdd cost={rnd.random():.3f} "
+                                   f"composite_weight=0.5 sampling_probability={1 / nroutes:.6f}")
+                    log.append(f"DEBUG hopr_transport::path::planner: drawing return paths from "
+                               f"tempered weights count=4 candidates={nroutes} distinct_relayers={nroutes}")
                 (sd / "gnosisvpn.log").write_text("\n".join(log) + "\n")
                 lines.append(f"{cyc},{arm},{ex},{sd},3.2,3,ok")
     (root / "summary.csv").write_text("\n".join(lines) + "\n")

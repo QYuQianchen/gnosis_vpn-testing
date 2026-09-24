@@ -70,7 +70,16 @@ return_path_weight_temper = 1.0   # untemper the weights
 
 `max_cached_paths = 1` leaves the `WeightedCollection` with a single entry, so
 every packet's forward route and every SURB's return route resolve to the same
-path. **A genuine pin of both legs, no recompile, no channel churn.**
+path. **A genuine pin of both legs, no recompile, no channel churn** — with one
+qualification, measured on the test VM: the planner re-evaluates each
+destination's entry at every cache refresh (`kind="background-refresh"`,
+`refresh_period` = half of `cache_ttl`, 10 s by default) and may pick a
+*different* single path. Pinned means **one path at a time**: per-packet
+striping is gone, but the route can still switch every few seconds (`auto`:
+3 candidates, 9 paths over 90 s; `pin-planner`: 1 candidate, 4 paths). A switch
+is one discontinuity per refresh, not reordering on every packet, so it does
+not undo the pin's test of the striping hypothesis — but if the floors turn out
+to follow path *switches*, a longer `cache_ttl` is the next variable to try.
 
 Setting `GNOSISVPN_HOPR_CONFIG_PATH` is exactly backwards: `from_path`
 deserializes `HoprLibConfig` straight from disk and never calls `apply()`, so it

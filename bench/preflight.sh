@@ -288,7 +288,7 @@ for a in $ARMS; do
   printf '\n  --- %s ---\n' "$a"
   out="$("$KIT/bench/use-arm.sh" "$a" --count 2>&1)"
   echo "$out" | sed 's/^/  /'
-  n="$(printf '%s' "$out" | sed -n 's/.* routes=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+  n="$(printf '%s' "$out" | sed -n 's/.* candidates=\([0-9][0-9]*\).*/\1/p' | tail -1)"
   if [ -z "$n" ]; then
     bad "arm '$a' produced no route count"
     continue

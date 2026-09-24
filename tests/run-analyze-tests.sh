@@ -53,6 +53,25 @@ check broken 'CAVEATS'                      'lists the caveat on the console'
 check thin   'Too few sessions|NOT conclusive' 'declines at 5 cycles'
 check thin   'Smallest arm has 5 usable'       'names the sample size in a caveat'
 
+# The pin is checked on the arms CONFIGURED to pin, not on whichever arm wins.
+# In `thin`, sampling noise makes no-explore the best arm; it draws from 6
+# candidates by design, and must not void the run.
+grep -q 'PIN DID NOT TAKE' "$TMP/thin.out" \
+  && { printf '  FAIL  thin     a winning UNPINNED arm voided the run\n'; fail=1; } \
+  || printf '  ok    thin     a winning unpinned arm does not void the run\n'
+
+# The manifest's pinned_arms is authoritative: declare no-explore pinned and its
+# 6 candidates must void the run.
+cp -r "$TMP/run-thin" "$TMP/run-declared"
+python3 - "$TMP/run-declared" <<'EOF'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1]) / "manifest.json"
+m = json.loads(p.read_text()); m["pinned_arms"] = "no-explore"
+p.write_text(json.dumps(m))
+EOF
+python3 "$KIT/bench/gvpn-analyze.py" "$TMP/run-declared" --floor-mbps 5 > "$TMP/declared.out"
+check declared "PIN DID NOT TAKE — 'no-explore'" 'uses the manifest'"'"'s pinned_arms'
+
 # A trial is a rehearsal, so its report must refuse to score the arms EVEN when
 # the data shows a huge effect -- the failure this guards against is a
 # rehearsal's report being pasted into the issue as if it were the study.

@@ -3,6 +3,7 @@
 
     tomlmerge.py render BASE OVERLAY OUT --hops N [--destination NAME] [--label TEXT]
     tomlmerge.py check  FILE
+    tomlmerge.py get    FILE dotted.key         prints the value, or nothing if unset
 
 render  copies BASE, keeps only --destination (if given), sets
         `path = { hops = N }` on each destination, and MERGES OVERLAY table by
@@ -198,7 +199,14 @@ def main():
     r.add_argument("--label")
     c = sub.add_parser("check")
     c.add_argument("file")
+    g = sub.add_parser("get")
+    g.add_argument("file"); g.add_argument("key")
     a = ap.parse_args()
+    if a.cmd == "get":
+        v = lookup(parse(open(a.file).read(), a.file) or {}, tuple(a.key.split(".")))
+        if v is not KeyError:
+            print(v)
+        return
     if a.cmd == "render":
         a.overlay = None if a.overlay == "-" else a.overlay
         render(a)

@@ -44,6 +44,26 @@ move a number or break a node — not for docs or comments.
   packaged `gnosisvpn.env`'s `RUST_LOG=info` won. It is now an `EnvironmentFile=`
   in the drop-in, read last. Preflight checks the running process's environment.
 
+### Fixed — the pin check measured the wrong thing (would have voided every study)
+
+- First real counts: `auto` 3 candidates / 9 paths, `pin-planner` 1 candidate /
+  4 paths. The headline was `max(distinct paths, candidates)`, so the working pin
+  read 4, preflight would have refused it and every report voided itself. Distinct
+  paths over a window is **churn**: the planner rebuilds each destination's cache
+  entry at every refresh (`fill` / `background-refresh` / `recompute`) and may
+  pick a different single path. The pin check is now the **candidate set per
+  draw**: `lib/routes.py` groups `weighted candidate path` lines into rebuilds
+  (per destination, closing when `sampling_probability` reaches 1 or a path
+  repeats) and combines that with the return draw's `candidates=`. Churn is
+  reported separately. `tests/run-routes-tests.sh` replays both measurements.
+- **The analyzer checked the pin on the best-performing arm**, whatever it was:
+  when noise made `no-explore` win, its (correct) 6 candidates voided the run.
+  The bench now records `pinned_arms` — arms whose config sets
+  `max_cached_paths = 1` — and the pin is checked on exactly those. Verdicts name
+  the winning arm instead of saying "Pinning the path …". A baseline drawing from
+  a single candidate gets a caveat. The fixture now churns, so it fails on the
+  old headline.
+
 ### Fixed — every connect failed on hosts with an off-link gateway
 
 - On this VM the default route reaches its gateway only via `onlink`. In static

@@ -902,6 +902,15 @@ CLIENT_PKG="$(printf '%s' "$CLIENT_INFO" | sed -n 's/.*package version:[[:space:
 KIT_REV="$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || true)"
 git -C "$KIT" diff --quiet HEAD 2>/dev/null || KIT_REV="${KIT_REV:+$KIT_REV}-dirty"
 
+# Which arms are CONFIGURED to pin (one candidate path), read from their configs
+# -- the analyzer checks the pin on exactly these, whichever arm performs best.
+PINNED_ARMS=""
+for _a in $ARMS; do
+  [ "$(python3 "$GVPN_KIT/lib/tomlmerge.py" get "$ARMS_DIR/$_a/config.toml" \
+        connection.path_planner.max_cached_paths 2>/dev/null)" = 1 ] && PINNED_ARMS="$PINNED_ARMS $_a"
+done
+PINNED_ARMS="${PINNED_ARMS# }"
+
 cat > "$RUN_DIR/manifest.json" <<EOF
 {"version":"$VERSION","profile":"$PROFILE","trial":$([ "$TRIAL" = 1 ] && echo true || echo false),"mode":"$MODE",
  "client_service":"$CLIENT_SVC","client_package":"$CLIENT_PKG",
@@ -912,7 +921,7 @@ cat > "$RUN_DIR/manifest.json" <<EOF
  "dl_seconds":"${DL_SECONDS:-}","ul_seconds":"${UL_SECONDS:-}",
  "reps":$REPS,"rep_gap_s":$REP_GAP_S,"udp_seconds":${UDP_SECONDS:-0},"udp_rate":"$UDP_RATE",
  "leg_timeout":$LEG_TIMEOUT,"cycles":$CYCLES,"duration":"${DURATION:-}",
- "arms":"$ARMS","destinations":"${DESTINATIONS:-}","target":"$TARGET","dl_url":"${DL_URL:-}","ul_url":"${UL_URL:-}",
+ "arms":"$ARMS","pinned_arms":"$PINNED_ARMS","destinations":"${DESTINATIONS:-}","target":"$TARGET","dl_url":"${DL_URL:-}","ul_url":"${UL_URL:-}",
  "iperf_server":"$IPERF_SERVER","udp_host":"${UDP_HOST:-}","started":"$(stamp)"}
 EOF
 

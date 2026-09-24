@@ -72,8 +72,8 @@ that it works:
 
 ```sh
 [VM] make arms                             # sudo -E ./setup/02-make-arms.sh
-[VM] make count ARM=auto                   # must read MANY routes
-[VM] make count ARM=pin-planner            # must read 1
+[VM] make count ARM=auto                   # candidates > 1 (on jura: 3)
+[VM] make count ARM=pin-planner            # candidates = 1
 ```
 
 `make arms` merges each arm's settings into the node's network config and
@@ -81,8 +81,14 @@ refuses to write anything that does not parse. `make count` installs the arm,
 connects, pulls traffic for 90 s and counts the routes the planner used; if the
 service will not start with that arm, it puts the network config back.
 
-**Do not go further until `auto` reads many and `pin-planner` reads 1.** If both
-read many, the pin is not taking effect and every later number is about nothing.
+**Do not go further until `auto` reads more than 1 candidate and `pin-planner`
+reads 1.** If both read more than 1, the pin is not taking effect.
+
+`candidates` is the set each draw picks from — the per-packet striping #8408 is
+about. `churn` is how many different paths were used over the 90 s; it can be
+above 1 even when pinned, because the planner re-evaluates at every cache refresh
+and may switch to a different single path. Pinned means **one path at a time**,
+not one path for the whole session.
 
 ## 4 · Run a study
 
@@ -134,7 +140,7 @@ too, so a run is never unidentifiable.)
 
 `results/<study>/report.md` is what goes into #8408. Before quoting it:
 
-- **`distinct routes` must be 1 for `pin-planner`.** If not, the report voids itself.
+- **`candidate paths` must be 1 for `pin-planner`.** If not, the report voids itself.
 - **Bracketed ranges are 90 % confidence intervals.** One that spans zero means
   the arms are indistinguishable at that sample size.
 - **The headline is the floor rate and the slow 10 %**, not the median.
@@ -182,8 +188,8 @@ To put the network config back after an arm, without repairing anything:
 | `start request repeated too quickly` | systemd gave up after 5 failures; the kit's scripts clear this themselves (`systemctl reset-failed gnosisvpn`) |
 | `service not running` from `gnosis_vpn-ctl` | the daemon is down; no `ctl` command can fix that — repair the daemon first |
 | `NO RESULT: the planner logged no candidate paths` | planner DEBUG is not active; re-run `00-vm-setup.sh`. Not the same as 1 route |
-| `auto` reads 1 route | the node holds one channel — the baseline has no diversity to lose, every comparison is void |
-| `pin-planner` reads many | the override is not applied — `sudo ./bench/use-arm.sh --show` |
+| `auto` reads candidates = 1 | the node holds one channel — the baseline has no diversity to lose, every comparison is void |
+| `pin-planner` reads candidates > 1 | the override is not applied — `sudo ./bench/use-arm.sh --show` |
 | push rejected, "not owned by deploy" | `./tools/fix-worktree-ownership.sh --apply` on the VM |
 | report says `THE PIN DID NOT TAKE` | the run compared `auto` with itself; discard it |
 

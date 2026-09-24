@@ -24,7 +24,7 @@ Reads a gvpn-bench.sh run directory and answers three questions:
      capacity. The first two need nothing but the VM.
 
 Also reported: frame discard rate from the client's own telemetry, and how many
-distinct routes the planner actually drew from (needs planner DEBUG logging).
+candidate paths the planner drew from, per draw (needs planner DEBUG logging).
 
 THE OUTPUT IS A DOCUMENT, NOT A DUMP. It opens with a verdict in words and three
 numbers, and only then shows the tables that support it. Anyone should be able to
@@ -184,14 +184,14 @@ import routes  # noqa: E402  -- the one route parser, shared with use-arm.sh
 
 
 def distinct_relays(path: Path):
-    """Distinct routes the planner drew, or None if it logged nothing (so the
-    column reads '-' rather than a misleading 0). See lib/routes.py."""
+    """The largest candidate set the planner drew from this session -- the pin
+    check -- or None if it logged nothing (the column reads '-', not a misleading
+    0). Not distinct paths over the session: a pinned planner still switches path
+    at a cache refresh. See lib/routes.py."""
     if not path.exists():
         return None
     r = routes.scan(path.read_text(errors="ignore"))
-    if not r["lines"]:
-        return None
-    return max(r["paths"], r["candidates"])
+    return r["candidates"] if r["lines"] else None
 
 
 # ---------------------------------------------------------------- per rep --
@@ -562,9 +562,17 @@ def main():
     # The pin not taking is not a result with a caveat, it is the absence of a
     # result: both arms ran the same routing. That has to outrank every other
     # verdict, or someone reads a table comparing an arm with itself.
-    pin_broken = (champion is not None
-                  and stats[champion]["relays"] is not None
-                  and stats[champion]["relays"] > 1.5)
+    #
+    # Checked on the arms CONFIGURED to pin (recorded by the bench from their
+    # configs), not on whichever arm performed best: a winning unpinned arm
+    # such as no-explore is supposed to draw from many candidates. Runs from
+    # before the manifest field fall back to the arm names.
+    declared = manifest.get("pinned_arms")
+    pinned = (declared.split() if isinstance(declared, str) else
+              [a for a in stats if a == "pin-planner" or a.startswith("pin-cfg-pinned")])
+    broken_pins = [a for a in pinned if a in stats and stats[a]["relays"] is not None
+                   and stats[a]["relays"] > 1.5]
+    pin_broken = bool(broken_pins)
 
     # A trial is a rehearsal of the pipeline, not a measurement of anything: one
     # cycle of 5 MB transfers. It outranks every other verdict because the whole
@@ -579,19 +587,20 @@ def main():
     elif champion is None:
         headline = f"Only one arm in this run — nothing to compare against '{BASE}'."
     elif pin_broken:
-        headline = (f"THE PIN DID NOT TAKE — '{champion}' still drew from "
-                    f"{stats[champion]['relays']:.1f} routes. This run compares "
+        a = broken_pins[0]
+        headline = (f"THE PIN DID NOT TAKE — '{a}' still drew from "
+                    f"{stats[a]['relays']:.1f} candidate paths. This run compares "
                     f"'{BASE}' with itself; the numbers below mean nothing.")
     elif v10 is None:
         headline = ("Too few sessions to separate the arms. "
                     "Treat this as a signal check, not a result.")
     elif v10 > 0 and floor_champ is not None and floor_champ < floor_base:
-        headline = f"Pinning the path RAISES the performance floor ('{champion}' vs '{BASE}')."
+        headline = f"'{champion}' RAISES the performance floor vs '{BASE}'."
     elif v10 > 0:
         headline = (f"'{champion}' lifts the slow tail, but the share of floored "
                     f"sessions is not clearly lower.")
     elif v10 < 0:
-        headline = f"Pinning the path makes the slow tail WORSE ('{champion}' vs '{BASE}')."
+        headline = f"'{champion}' makes the slow tail WORSE vs '{BASE}'."
     elif d10 is not None and abs(d10) > 15:
         # A large point estimate with an interval that still includes zero is the
         # easiest result in this whole exercise to over-claim. Say both halves.
@@ -710,7 +719,7 @@ def main():
         te = Table([("exit", "<"), ("arm", "<"), ("n", ">"),
                     ("slow 10%", ">"), ("median", ">"), ("fast 10%", ">"), ("upload", ">"),
                     (f"below {args.floor_mbps:g}", ">"), ("rtt ms", ">"), ("jitter ms", ">"),
-                    ("loss %", ">"), ("discard %", ">"), ("routes", ">"),
+                    ("loss %", ">"), ("discard %", ">"), ("candidates", ">"),
                     (f"Δ median vs {BASE}", ">")])
         first = True
         for ex in real_exits:
@@ -781,7 +790,7 @@ def main():
         out.append("")
         tq = Table([("arm", "<"), ("frame discard %", ">"), ("TCP retx", ">"),
                     ("ping loss %", ">"), ("ping jitter ms", ">"), ("ping rtt ms", ">"),
-                    ("UDP loss %", ">"), ("UDP jitter ms", ">"), ("distinct routes", ">")])
+                    ("UDP loss %", ">"), ("UDP jitter ms", ">"), ("candidate paths", ">")])
         for a in arms_sorted:
             ss = by_arm[a]["sessions"]
 
@@ -905,11 +914,15 @@ def main():
                        "It proves the arms load and data moves. It cannot "
                        "support any comparison between arms — re-run without "
                        "--trial for that.")
-    if pin_broken:
-        caveats.append(f"'{champion}' drew from {stats[champion]['relays']:.1f} distinct "
-                       f"routes, not 1. Its [connection.path_planner] override is not applied — "
-                       f"check the systemd drop-in and re-run "
-                       f"`use-arm.sh {champion} --count` until it reads 1.")
+    for a in broken_pins:
+        caveats.append(f"'{a}' drew from {stats[a]['relays']:.1f} candidate paths, not 1. "
+                       f"Its [connection.path_planner] override is not applied — check "
+                       f"`use-arm.sh --show`, then re-run `use-arm.sh {a} --count` until "
+                       f"it reads candidates=1.")
+    if BASE in stats and stats[BASE]["relays"] is not None and stats[BASE]["relays"] <= 1:
+        caveats.append(f"'{BASE}' drew from a single candidate path: the baseline had no "
+                       f"path diversity to lose, so no arm can be compared against it. "
+                       f"Check the node's open channels.")
     if n_min < 30:
         caveats.append(f"Smallest arm has {n_min} usable sessions. Tail statistics are not "
                        f"trustworthy below ~30 — signal check, not a result.")

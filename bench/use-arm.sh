@@ -153,16 +153,18 @@ url="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
 curl -s -o /dev/null --max-time "$SETTLE" "${url//\{bytes\}/2000000000}" || true
 "$CTL" disconnect >/dev/null 2>&1 || true
 
-read -r lines paths cands < <(python3 "$GVPN_KIT/lib/routes.py" "$GVPN_SERVICE_LOG" \
-    --from-byte "$log_from" | sed 's/[a-z]*=//g')
+r="$(python3 "$GVPN_KIT/lib/routes.py" "$GVPN_SERVICE_LOG" --from-byte "$log_from")"
+get() { printf '%s\n' "$r" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
 
-if [ "${lines:-0}" -eq 0 ]; then
+if [ "$(get lines)" -eq 0 ]; then
   say "NO RESULT: the planner logged no candidate paths"
   echo "    Not the same as 1 route -- nothing was counted. Planner DEBUG is off:"
-  echo "    sudo ./setup/00-vm-setup.sh --network <net>   then re-run this"
+  echo "    sudo ./setup/00-vm-setup.sh   then re-run this"
   exit 1
 fi
-routes=$(( paths > cands ? paths : cands ))     # same definition as gvpn-analyze.py
-say "RESULT: '$ARM' routes=$routes   (distinct paths=$paths, max candidates=$cands, $lines lines)"
-[ "$paths" = "$cands" ] || echo "    the two measures disagree -- read lib/routes.py before trusting either"
-echo "    expected: pin-planner = 1, auto = many. Both many => the override is not applied."
+say "RESULT: '$ARM' candidates=$(get candidates)   (forward $(get forward), return $(get return))"
+echo "    churn: $(get churn) distinct paths over the window, $(get rebuilds) cache rebuilds, $(get lines) lines"
+echo
+echo "    candidates = the set each draw picks from; 1 means one path at a time (no striping)."
+echo "    churn      = how often a refresh switched path; it can exceed 1 even when pinned."
+echo "    expected:  pin-planner candidates = 1;  auto > 1 (on jura, capped at 3)."
