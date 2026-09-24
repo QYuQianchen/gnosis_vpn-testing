@@ -145,7 +145,35 @@ if systemctl is-active --quiet gnosisvpn; then
   pass "gnosisvpn service is active"
 else
   bad "gnosisvpn service is not active -- systemctl status gnosisvpn"
+  code="$(systemctl show gnosisvpn -p ExecMainStatus --value 2>/dev/null)"
+  case "$code" in
+    66) note "exit 66 = EX_NOINPUT: a file could not be OPENED, so the config was"
+        note "never read. Most often the node was never onboarded and has no"
+        note "identity yet. Check: ls -l /var/lib/gnosisvpn/.config" ;;
+    78) note "exit 78 = EX_CONFIG: the config was read and rejected -- a bad key" ;;
+  esac
 fi
+
+# The service being active is NOT the same as the client running. systemd starts
+# the daemon; `gnosis_vpn-ctl start-client` onboards. Until that has happened
+# there is no identity, no channels and no destinations -- and every later stage
+# fails in a way that looks like something else.
+if [ -d /var/lib/gnosisvpn/.config ] && [ -n "$(ls -A /var/lib/gnosisvpn/.config 2>/dev/null)" ]; then
+  pass "node has an identity"
+else
+  bad "no identity at /var/lib/gnosisvpn/.config -- this node has never onboarded"
+  note "Run once, and wait for Ready:"
+  note "  gnosis_vpn-ctl start-client 60m && watch -n5 gnosis_vpn-ctl status"
+  note "Then re-render the arms: sudo -E ./setup/02-make-arms.sh"
+fi
+
+st="$(timeout 10 "$CTL" -o plain status 2>&1 || true)"
+case "$st" in
+  Ready*|Connected*|Idle*) pass "client reports: $(printf '%s' "$st" | head -1)" ;;
+  "")                      bad "the client did not answer -- is the service running?" ;;
+  *)                       warn "client is not Ready: $(printf '%s' "$st" | head -1)"
+                           note "start it with: gnosis_vpn-ctl start-client 60m" ;;
+esac
 
 # An unpinned version is the single most expensive silent failure available: the
 # client upgrades mid-study and the run compares versions instead of arms.

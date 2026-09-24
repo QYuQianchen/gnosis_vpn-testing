@@ -43,14 +43,36 @@ No faucet codes are needed; no shipped arm re-onboards.
 ```sh
 # Mac
 make push
-
-# VM, once per node
-ssh gvpn-vm && cd ~/gvpn-8408
-sudo -E ./setup/02-make-arms.sh
 ```
 
 `make push` is refused while a run is in progress — a deploy rewrites scripts in
 place and bash reads a script as it executes.
+
+## Prepare the node — once
+
+```sh
+ssh gvpn-vm && cd ~/gvpn-8408
+
+# 1. the VM itself: client, policy route, planner DEBUG logging, log rotation
+sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
+
+# 2. ONBOARD. The service being active is not the same as the client running:
+#    systemd starts the daemon, this starts the client, and until it reaches
+#    Ready the node has no identity, no channels and no destinations.
+gnosis_vpn-ctl start-client 60m
+watch -n5 gnosis_vpn-ctl status        # wait for Ready before anything else
+
+# 3. back up the funded identity, now that there is one
+make backup
+
+# 4. render the arms — needs the node's own addresses, so it must come after (2)
+sudo -E ./setup/02-make-arms.sh
+```
+
+Step 2 is the one people skip, because `systemctl is-active gnosisvpn` looks
+like success. It is not: onboarding is what creates the identity the rest of
+the kit depends on, and step 4 reads addresses that do not exist until it has
+finished.
 
 ## Run
 
@@ -118,6 +140,8 @@ protects nothing. Keep the Contabo console reachable.
 | `THE CLIENT REJECTED THIS ARM'S CONFIG` | a key this build does not know. The error's "expected one of …" is the authoritative list for *this binary*. `use-arm.sh` has already rolled back |
 | `auto drew 1 route` | the node holds one channel — the baseline has no diversity to lose, so every comparison is void |
 | `pin-planner drew N routes` | the `[connection.path_planner]` override is not being applied; check the arm's `config.toml` |
+| `SERVICE DID NOT START`, exit **66** | `EX_NOINPUT` — a file it needs could not be *opened*. The config was never read, so this is not a bad key. Check `systemctl cat gnosisvpn` for a drop-in naming a file that no longer exists, and `ls -l /etc/gnosisvpn/` |
+| `SERVICE DID NOT START`, exit **78** | `EX_CONFIG` — the config *was* read and rejected. That is a bad key |
 | `NO RESULT: no 'candidate path' lines` | planner DEBUG is off. Not "one route" — nothing was counted |
 | `a run is already in progress` | `make status`; clear the lock only if stale |
 | `unsubstituted placeholders` | the node had not onboarded when `make arms` ran |

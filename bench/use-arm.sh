@@ -152,8 +152,56 @@ rollback() {
 
 if ! systemctl is-active --quiet gnosisvpn; then
   say "SERVICE DID NOT START"
-  journalctl -u gnosisvpn -n 30 --no-pager | grep -iE 'error|panic|config|expected' || \
-    journalctl -u gnosisvpn -n 30 --no-pager
+
+  # Report the exit STATUS first. systemd's own lines say a unit failed and
+  # nothing about why; the binary's status code is the one piece of evidence
+  # that is always present, and a previous version of this grep threw it away
+  # along with the binary's own message.
+  code="$(systemctl show gnosisvpn -p ExecMainStatus --value 2>/dev/null)"
+  case "$code" in
+    64) why="EX_USAGE: bad command line -- check the service flags drop-in" ;;
+    66) why="EX_NOINPUT: a file it needs could not be OPENED. Not a parse error --
+          the config was never read. Most often the node has never onboarded, so
+          there is no identity yet: gnosis_vpn-ctl start-client 60m" ;;
+    69) why="EX_UNAVAILABLE: a service it depends on is unreachable" ;;
+    70) why="EX_SOFTWARE: internal error" ;;
+    77) why="EX_NOPERM: permission denied" ;;
+    78) why="EX_CONFIG: the config was read and rejected" ;;
+    *)  why="" ;;
+  esac
+  [ -n "$code" ] && echo "    exit status: $code${why:+  ($why)}"
+
+  # Unfiltered. A grep here hides exactly the line that is unlike the others.
+  echo
+  echo "    --- journalctl -u gnosisvpn -n 30 ---"
+  journalctl -u gnosisvpn -n 30 --no-pager 2>/dev/null | sed 's/^/    /'
+  if [ -s /var/log/gnosisvpn/gnosisvpn.log ]; then
+    echo
+    echo "    --- /var/log/gnosisvpn/gnosisvpn.log (last 20) ---"
+    tail -20 /var/log/gnosisvpn/gnosisvpn.log | sed 's/^/    /'
+  fi
+
+  # For EX_NOINPUT, say which files are actually reachable rather than leaving
+  # the operator to guess which "input" was missing.
+  if [ "$code" = 66 ]; then
+    echo
+    echo "    --- files the service needs ---"
+    for f in "$CONFIG_PATH" /var/lib/gnosisvpn/.config; do
+      if [ -e "$f" ]; then
+        printf '    %s  %s\n' "$(stat -c '%A %U:%G' "$f")" "$f"
+      else
+        printf '    MISSING                %s\n' "$f"
+      fi
+    done
+    echo "    service user: $(systemctl show gnosisvpn -p User --value 2>/dev/null || echo root)"
+    echo
+    echo "    paths named inside the installed config.toml:"
+    grep -oE '"/[^"]+"' "$CONFIG_PATH" 2>/dev/null | tr -d '"' | sort -u | while read -r f; do
+      [ -e "$f" ] && printf '    ok       %s\n' "$f" || printf '    MISSING  %s\n' "$f"
+    done
+    echo "    (nothing listed = the config names no absolute paths)"
+  fi
+
   rollback
   exit 1
 fi

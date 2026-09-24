@@ -41,6 +41,32 @@ was switching away from was the only one doing the work.
   this by hand is gone, along with `hopr.yaml`, the `env` file and
   `HOPR_YAML_DEST` (still deleted on install, to clear stale copies).
 
+### The docs lost the onboarding step
+
+Collapsing ten documents into three dropped `gnosis_vpn-ctl start-client`, which
+`START-HERE.md` had carried. `run.md` went straight from `02-make-arms.sh` to
+preflight, and its manual gate ran `gnosis_vpn-ctl connect UK` on a node that
+might never have been started. The service being active is not the same as the
+client running: systemd starts the daemon, `start-client` onboards, and until
+that finishes there is no identity, no channels and no destinations — so
+`02-make-arms.sh` has no addresses to substitute and every later stage fails in
+a way that looks like something else. Restored in `run.md` and the README
+quick-start, and preflight now checks for an identity and asks the client for
+its state, rather than trusting `systemctl is-active`.
+
+### The failure diagnostic hid the evidence
+
+When the service failed to start, `use-arm.sh` piped the journal through
+`grep -iE 'error|panic|config|expected'` and printed only the matches. systemd's
+own lines match those words; the binary's message often does not — so the filter
+reliably kept the noise and dropped the signal. It also never reported
+`ExecMainStatus`, which is the one piece of evidence always present: exit 66 is
+`EX_NOINPUT` (a file could not be opened — the config was never read) and 78 is
+`EX_CONFIG` (it was read and rejected), and those point at completely different
+causes. It now decodes the status, prints the journal and service log
+unfiltered, and for `EX_NOINPUT` lists the mode and owner of every file the
+service needs plus every absolute path named inside the installed config.
+
 ### use-arm.sh left the node broken on a rejected config
 
 The post-install gate checked `systemctl is-active`, but a rejected hopr config

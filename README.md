@@ -3,8 +3,13 @@
 Pinned vs. automatic path finding on Gnosis VPN, on a dedicated Ubuntu VM.
 
 ```sh
-make push                                                   # Mac
-ssh gvpn-vm && cd ~/gvpn-8408 && sudo -E ./setup/02-make-arms.sh
+make push                                    # Mac
+ssh gvpn-vm && cd ~/gvpn-8408
+
+sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
+gnosis_vpn-ctl start-client 60m              # ONBOARD -- wait for Ready
+sudo -E ./setup/02-make-arms.sh              # needs the identity from above
+
 sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --pin-current --trial-only
 sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --launch -y
 ```
