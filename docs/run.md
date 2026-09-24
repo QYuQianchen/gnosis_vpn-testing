@@ -59,6 +59,9 @@ sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
 # 2. ONBOARD. The service being active is not the same as the client running:
 #    systemd starts the daemon, this starts the client, and until it reaches
 #    Ready the node has no identity, no channels and no destinations.
+#    The daemon must be up FIRST -- start-client talks to it over a socket and
+#    answers "service not running" if it is not:
+systemctl is-active gnosisvpn || sudo journalctl -u gnosisvpn -n 20 --no-pager
 gnosis_vpn-ctl start-client 60m
 watch -n5 gnosis_vpn-ctl status        # wait for Ready before anything else
 
@@ -134,13 +137,25 @@ protects nothing. Keep the Contabo console reachable.
 
 ## When it fails
 
+```sh
+sudo ./tools/diagnose.sh        # or: make diagnose
+```
+
+One read-only report: exit status decoded, the unit and every drop-in, the env
+files, the config and its tables, every absolute path they name marked present
+or missing, the identity directory, and the binary's own output unfiltered.
+Addresses and keys are redacted, so it is safe to paste. Start here rather than
+with a single `journalctl` — these facts are useless one at a time.
+
+
 | Symptom | What it is |
 |---|---|
 | `the study sets no GVPN_PIN_VERSION` | add `--pin-current`, or pick one with `05-set-version.sh --list` |
 | `THE CLIENT REJECTED THIS ARM'S CONFIG` | a key this build does not know. The error's "expected one of …" is the authoritative list for *this binary*. `use-arm.sh` has already rolled back |
 | `auto drew 1 route` | the node holds one channel — the baseline has no diversity to lose, so every comparison is void |
 | `pin-planner drew N routes` | the `[connection.path_planner]` override is not being applied; check the arm's `config.toml` |
-| `SERVICE DID NOT START`, exit **66** | `EX_NOINPUT` — a file it needs could not be *opened*. The config was never read, so this is not a bad key. Check `systemctl cat gnosisvpn` for a drop-in naming a file that no longer exists, and `ls -l /etc/gnosisvpn/` |
+| `SERVICE DID NOT START`, exit **66** | `EX_NOINPUT` — a file it needs could not be *opened*. The config was never read, so this is not a bad key. Check `systemctl cat gnosisvpn` for a drop-in naming a file that no longer exists, and `ls -l /etc/gnosisvpn/`. Repair with `sudo ./setup/00-vm-setup.sh --network <net>`, which rewrites the unit, the drop-ins and the config |
+| `ctl` says `service not running` | the daemon is down, so nothing the client can do will help. Fix the daemon first — this is never solved by re-running a `ctl` command |
 | `SERVICE DID NOT START`, exit **78** | `EX_CONFIG` — the config *was* read and rejected. That is a bad key |
 | `NO RESULT: no 'candidate path' lines` | planner DEBUG is off. Not "one route" — nothing was counted |
 | `a run is already in progress` | `make status`; clear the lock only if stale |

@@ -44,7 +44,7 @@ gvpn-8408/                    the repo — safe to force-checkout at any moment
         use-arm.sh            install one arm by hand; --count checks the pin took
   tools/close-channels.py     trim channels via the Safe, through blokli
         scan-secrets.sh       refuses addresses and peer IDs in a commit
-        install-hooks.sh backup-identity.sh fix-worktree-ownership.sh
+        diagnose.sh install-hooks.sh backup-identity.sh fix-worktree-ownership.sh
   tests/                      make test — analyzer and scanner suites
   results/<study>/            COMMITTED: report.md, summary.csv, manifest.json
 ```

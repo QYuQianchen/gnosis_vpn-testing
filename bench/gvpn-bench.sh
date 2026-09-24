@@ -167,6 +167,51 @@ PING_INTERVAL="${GVPN_PING_INTERVAL:-0.25}"
 # deploy or one `git clean -fdx` from gone.
 OUT_ROOT="${GVPN_OUT_ROOT:-$GVPN_RUNS_DIR}"
 CONFIG_PATH="${GNOSISVPN_CONFIG_PATH:-/etc/gnosisvpn/config.toml}"
+
+# ---------------------------------------------------------------- config IO --
+#
+# /etc/gnosisvpn/config.toml is a SYMLINK the installer uses to select a network
+# (-> config-jura-prod.toml). Two consequences this kit got wrong:
+#
+#   cp FILE config.toml     follows the link and OVERWRITES the packaged network
+#                           config, destroying it -- there is no other copy.
+#   cp -a config.toml BAK   copies the LINK, not its contents, so the "backup"
+#                           is a second symlink to the file being overwritten.
+#                           Restoring from it restores nothing.
+#
+# So an arm is installed the way the installer itself switches networks: write a
+# file of our own and re-point the symlink. The packaged configs are never
+# touched, and rollback is re-pointing the link back.
+ARM_CONFIG="${GVPN_ARM_CONFIG:-/etc/gnosisvpn/config-gvpn-arm.toml}"
+CONFIG_ORIG_MARKER="${GVPN_CONFIG_ORIG:-/etc/gnosisvpn/.gvpn-config-original}"
+
+# Remember what config.toml pointed at BEFORE this kit ever touched it, once.
+remember_original_config() {
+  [ -e "$CONFIG_ORIG_MARKER" ] && return 0
+  if [ -L "$CONFIG_PATH" ]; then
+    readlink -f "$CONFIG_PATH" > "$CONFIG_ORIG_MARKER"
+  elif [ -f "$CONFIG_PATH" ]; then
+    # Not a symlink on this node: keep a real copy of the contents.
+    cp "$CONFIG_PATH" "$CONFIG_PATH.gvpn-original"
+    printf '%s\n' "$CONFIG_PATH.gvpn-original" > "$CONFIG_ORIG_MARKER"
+  fi
+}
+
+install_arm_config() {  # install_arm_config SRC
+  remember_original_config
+  cp "$1" "$ARM_CONFIG"
+  chmod 0644 "$ARM_CONFIG"
+  # Match the packaged configs so the worker user can read it.
+  chown --reference="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || echo "$ARM_CONFIG")" \
+        "$ARM_CONFIG" 2>/dev/null || true
+  ln -sfn "$ARM_CONFIG" "$CONFIG_PATH"
+}
+
+restore_original_config() {
+  local orig; orig="$(cat "$CONFIG_ORIG_MARKER" 2>/dev/null || true)"
+  [ -n "$orig" ] && [ -e "$orig" ] || return 1
+  ln -sfn "$orig" "$CONFIG_PATH"
+}
 HOPR_YAML_DEST="${GVPN_HOPR_YAML_DEST:-/etc/gnosisvpn/hopr-arm.yaml}"
 DROPIN="/etc/systemd/system/gnosisvpn.service.d/30-arm.conf"
 CTL="${GVPN_CTL:-gnosis_vpn-ctl}"
@@ -522,8 +567,7 @@ apply_arm_config() {  # apply_arm_config ARM_DIR
   svc_stop >>"$RUN_LOG" 2>&1
   sleep 2
 
-  cp -a "$CONFIG_PATH" "$CONFIG_PATH.bench-backup" 2>/dev/null
-  cp "$arm_dir/config.toml" "$CONFIG_PATH" || return 1
+  install_arm_config "$arm_dir/config.toml" || return 1
 
   mkdir -p "$(dirname "$DROPIN")"
   # Legacy cleanup: older kit versions installed a hopr-lib YAML here and pointed

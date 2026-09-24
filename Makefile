@@ -17,7 +17,7 @@ BRANCH  ?= main
 # Newest run in the state directory -- what `make report` reads by default.
 RUN ?= $(shell ls -1dt $(STATE)/runs/*/ 2>/dev/null | head -1)
 
-.PHONY: help push test hooks smoke dry trial preflight soak report publish arms status clean-runs backup fix-perms
+.PHONY: help push test hooks diagnose smoke dry trial preflight soak report publish arms status clean-runs backup fix-perms
 
 help:
 	@echo "make hooks         install the pre-commit secret scan (once per clone)"
@@ -26,6 +26,7 @@ help:
 	@echo "make status        what is installed and whether a run is in progress"
 	@echo "make backup        encrypted, verified identity backup      [VM, sudo]"
 	@echo "make fix-perms     clear root-owned leftovers blocking a deploy [VM]"
+	@echo "make diagnose      one paste explaining why the service will not start [VM, sudo]"
 	@echo "make arms          render arm templates into $(STATE)/arms   [VM, sudo]"
 	@echo "make dry           print the schedule without running it     [VM]"
 	@echo "make trial STUDY=<name>      rehearse: 1 cycle x 5 MB        [VM, sudo]"
@@ -70,6 +71,9 @@ status:
 backup:
 	sudo -E ./tools/backup-identity.sh
 
+
+diagnose:
+	sudo -E ./tools/diagnose.sh
 
 fix-perms:
 	./tools/fix-worktree-ownership.sh --apply
