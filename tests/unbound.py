@@ -6,8 +6,8 @@
 Under `set -u`, such a reference aborts the script -- the failure that shipped
 when the faucet-code variables were deleted but two uses of them were not. Only
 unguarded uses count: `$X`, `${X}`, `${X#..}`; not `${X:-..}`, `${X-..}`,
-`${X:+..}`, `${X:=..}`. A name counts as assigned if the script, lib/common.sh
-or gvpn.conf assigns it anywhere (NAME=, local/declare/export/readonly NAME,
+`${X:+..}`, `${X:=..}`. A name counts as assigned if the script assigns it, or
+it sources lib/common.sh and that (or gvpn.conf) does (NAME=, local/declare/export/readonly NAME,
 read ... NAME, for NAME in, printf -v NAME, getopts .. NAME).
 
 Deliberately simple and conservative: it reads text, not an AST, so it strips
@@ -90,8 +90,12 @@ def main():
             shared |= assigned(strip(f.read_text()))
     bad = 0
     for path in sys.argv[1:]:
-        text = strip(pathlib.Path(path).read_text())
-        known = shared | assigned(text) | BUILTIN
+        raw = pathlib.Path(path).read_text()
+        text = strip(raw)
+        # common.sh's names count only for a script that sources it: 05-set-version.sh
+        # used $GVPN_STATE without sourcing it, and this check passed it anyway.
+        sources = pathlib.Path(path).resolve() in [f.resolve() for f in SHARED] or "lib/common.sh" in raw
+        known = (shared if sources else set()) | assigned(text) | BUILTIN
         for name, line in sorted(unguarded(text).items(), key=lambda kv: kv[1]):
             if name not in known:
                 print(f"  {path}:{line}: ${name} is used without a default and never assigned")

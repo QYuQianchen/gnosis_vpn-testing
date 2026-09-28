@@ -30,6 +30,12 @@ move a number or break a node — not for docs or comments.
   VM's `.git/hooks`, which a push does not update: re-run
   `./setup/06-git-deploy.sh` once to install it. `tests/run-lock-tests.sh`
   covers every state in all three copies of the test.
+- **`05-set-version.sh --apply` aborted: `GVPN_STATE: unbound variable`.** Moving
+  `BUILD.txt` into the state dir made the script use `$GVPN_STATE` without
+  sourcing `lib/common.sh`, which defines it. It sources it now, and always
+  writes `BUILD.txt` there (the old worktree copy is only read). The lint passed
+  it because it counted `common.sh`'s names for every script; now only for
+  scripts that source it, with a canary for this case.
 - **Detached runs died overnight and left the node on an arm.** Twice a
   launched study stopped with no `finished.json`, a stale lock and
   `config.toml -> config-gvpn-arm.toml`: the bench was killed before its

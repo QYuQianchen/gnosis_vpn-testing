@@ -29,6 +29,7 @@
 #   it, and leave it alone until the run is finished.
 #
 set -euo pipefail
+. "$(cd "$(dirname "$0")/.." && pwd)/lib/common.sh"   # GVPN_STATE, gvpn_give_back
 
 CONFIG_FILE="${GVPN_CONFIG:-$(cd "$(dirname "$0")/.." && pwd)/gvpn.conf}"
 [ -r "$CONFIG_FILE" ] && { set -a; . "$CONFIG_FILE"; set +a; }
@@ -37,10 +38,11 @@ CHANNEL="${GVPN_CHANNEL:-stable}"
 NETWORK="${GVPN_NETWORK:-jura-prod}"
 PIN_VERSION="${GVPN_PIN_VERSION:-}"
 BUILD_FILE="$GVPN_STATE/BUILD.txt"
-# Legacy: older kits wrote this into the worktree, where a sudo run left it
-# root-owned and blocked deploys. Read the old one if the new one is absent.
+# Older kits wrote this into the worktree (root-owned, it blocked deploys):
+# read it for --show, never write it.
 LEGACY_BUILD_FILE="$(cd "$(dirname "$0")/.." && pwd)/BUILD.txt"
-[ -r "$BUILD_FILE" ] || [ ! -r "$LEGACY_BUILD_FILE" ] || BUILD_FILE="$LEGACY_BUILD_FILE"
+SHOW_BUILD_FILE="$BUILD_FILE"
+[ -r "$BUILD_FILE" ] || [ ! -r "$LEGACY_BUILD_FILE" ] || SHOW_BUILD_FILE="$LEGACY_BUILD_FILE"
 ACTION=show
 
 usage() {
@@ -97,7 +99,7 @@ show() {
   say "configured"
   echo "    sources channel: $(sources_channel || echo '?')"
   echo "    gvpn.conf wants: channel=$CHANNEL network=$NETWORK pin=${PIN_VERSION:-<newest>}"
-  [ -r "$BUILD_FILE" ] && { echo; echo "    BUILD.txt:"; sed 's/^/      /' "$BUILD_FILE"; }
+  [ -r "$SHOW_BUILD_FILE" ] && { echo; echo "    BUILD.txt:"; sed 's/^/      /' "$SHOW_BUILD_FILE"; }
 
   say "available"
   apt policy gnosisvpn 2>/dev/null | sed 's/^/    /' || echo "    run: sudo apt-get update"
@@ -147,11 +149,13 @@ apt-mark hold gnosisvpn >/dev/null
 AFTER=$(dpkg-query -W -f='${Version}' gnosisvpn 2>/dev/null || echo "<none>")
 say "after: $AFTER"
 
+mkdir -p "$GVPN_STATE"
 { echo "recorded: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   gnosis_vpn-ctl -V 2>&1
   echo "channel: $CHANNEL  network: $NETWORK  pin: ${PIN_VERSION:-<newest>}"
   echo "package: $AFTER (was $BEFORE)"
 } > "$BUILD_FILE"
+gvpn_give_back "$BUILD_FILE"
 echo "    recorded in $BUILD_FILE"
 
 say "service"
