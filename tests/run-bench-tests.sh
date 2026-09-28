@@ -39,7 +39,7 @@ case "\${1:-}" in
                   connected*)  echo "Ready (Node is running) - traffic: Good, gas: Good"
                                echo "---"; echo "Connected to \${st#connected } (since 1s)" ;;
                 esac ;;
-  info)         echo "client service version: 0.96.2, package version: 2026.09.24+build.012613"
+  info)         echo "client service version: 0.96.2, package version: 2026.09.28+build.013542"
                 echo "log file: $LOG" ;;
   telemetry)    echo "hopr_session_frame_completed_total 100"; echo "hopr_session_frame_discarded_total 1" ;;
   nerd-stats)   echo "{}" ;;
@@ -83,7 +83,7 @@ while :; do echo "64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=25.0 ms"; sleep 
 EOF
 cat > "$SB/bin/dpkg-query" <<'EOF'
 #!/bin/sh
-echo "2026.09.24+build.012613"
+echo "2026.09.28+build.013542"
 EOF
 cat > "$SB/bin/journalctl" <<'EOF'
 #!/bin/sh

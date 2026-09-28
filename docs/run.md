@@ -44,7 +44,7 @@ execute. A lock left by a bench that died is cleared automatically.
 ```
 
 Channel, network and version come from `gvpn.conf` (`snapshot`, `jura-prod`,
-`2026.09.24+build.012613`); flags override them. Installs the client, the SSH-bypass policy route (plus a link-scope route for
+`2026.09.28+build.013542`); flags override them. Installs the client, the SSH-bypass policy route (plus a link-scope route for
 the gateway, which some hosts need — see Repair), planner DEBUG logging and log
 rotation, then starts the service. If the bypass cannot be installed, setup
 stops: a working tunnel would take your SSH with it. It checks the config first and stops with a
@@ -94,7 +94,7 @@ not one path for the whole session.
 
 A study is one file in `studies/`. The one that ships — `2026-09-24-transfers-25mb`
 — is 2 arms × 1 exit × 30 cycles of 25 MB, about 3 hours, pinned to
-`snapshot` / `jura-prod` / `2026.09.24+build.012613`. Leave `GVPN_FLOOR_MBPS`
+`snapshot` / `jura-prod` / `2026.09.28+build.013542`. Leave `GVPN_FLOOR_MBPS`
 empty; preflight measures it.
 
 ```sh

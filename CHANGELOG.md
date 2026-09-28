@@ -155,7 +155,7 @@ move a number or break a node — not for docs or comments.
 ### Changed
 
 - Defaults: `GVPN_CHANNEL=snapshot`, `GVPN_NETWORK=jura-prod`,
-  `GVPN_PIN_VERSION=2026.09.24+build.012613`, in `gvpn.conf` and the shipped
+  `GVPN_PIN_VERSION=2026.09.28+build.013542`, in `gvpn.conf` and the shipped
   study. A study that assigns `GVPN_PIN_VERSION`, even empty, overrides
   `gvpn.conf`. Setup now reports an installed version that differs from the pin.
 
