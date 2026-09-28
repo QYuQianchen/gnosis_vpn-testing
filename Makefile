@@ -49,7 +49,9 @@ push:
 	git push $(ORIGIN) $(BRANCH) && git push $(VM) $(BRANCH)
 
 status:
-	@./tools/run-lock.sh | head -1
+	@./tools/run-lock.sh | head -2 | grep -v '^clear it'
+	@r=$$(ls -1dt $(STATE)/runs/*/ 2>/dev/null | head -1); [ -z "$$r" ] || \
+	  echo "last run: $$(basename $$r)  $$(cat $${r}finished.json 2>/dev/null || echo '(no finished.json: running, or killed)')"
 	@echo "arms:    $$(ls $(STATE)/arms 2>/dev/null | tr '\n' ' ')"
 	@echo "runs:    $$(ls -1 $(STATE)/runs 2>/dev/null | wc -l)"
 	@echo "service: $$(systemctl is-active gnosisvpn)   config -> $$(readlink -f /etc/gnosisvpn/config.toml)"

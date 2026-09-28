@@ -30,7 +30,8 @@ case "$GVPN_LOCK_STATE" in
   live)    echo "LIVE: $GVPN_LOCK_RUN is running (pid $GVPN_LOCK_PID). Not touching it."; exit 1 ;;
   unknown) echo "LIVE?: $GVPN_LOCK_RUN has no owner recorded, and a bench is running:"
            echo "$running" | sed 's/^/  /'; exit 1 ;;
-  stale)   echo "STALE: $GVPN_LOCK_RUN -- its bench is not running" ;;
+  stale)   echo "STALE: $GVPN_LOCK_RUN -- its bench is not running"
+           { grep -h 'KILLED' "$GVPN_LOCK_RUN/run.log" 2>/dev/null || true; } | tail -1 | sed 's/^/  /' ;;
 esac
 
 if [ "$CLEAR" = 1 ]; then

@@ -89,6 +89,23 @@ cat > "$SB/bin/journalctl" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+# --- systemd-run: runs the unit's command, then its ExecStopPost with the result, like systemd
+cat > "$SB/bin/systemd-run" <<'EOF'
+#!/bin/bash
+post=""; envs=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --unit|--working-directory) shift 2 ;;
+    --quiet|--collect) shift ;;
+    -p) case "$2" in ExecStopPost=*) post="${2#ExecStopPost=}" ;; esac; shift 2 ;;
+    --setenv) envs+=("$2"); shift 2 ;;
+    *) break ;;
+  esac
+done
+( env "${envs[@]}" "$@" >/dev/null 2>&1; rc=$?
+  if [ "$rc" -gt 128 ]; then r=signal c=killed st=$((rc - 128)); else r=success c=exited st=$rc; fi
+  env "${envs[@]}" SERVICE_RESULT=$r EXIT_CODE=$c EXIT_STATUS=$st sh -c "$post" ) >/dev/null 2>&1 &
+EOF
 command -v sysctl >/dev/null || printf '#!/bin/sh\necho bbr\n' > "$SB/bin/sysctl"
 command -v ip     >/dev/null || printf '#!/bin/sh\nexit 0\n' > "$SB/bin/ip"
 chmod +x "$SB/bin/"*
@@ -137,7 +154,7 @@ n=$(awk -F, 'NR>1 && $NF=="ok"' "$RUN/summary.csv" 2>/dev/null | wc -l)
 
 # --detach (what `make launch` uses): the parent returns at once and hands the
 # lock to the child, which must hold it -- live -- until it finishes.
-DRUN="$(timeout 30 bash "$KIT/bench/gvpn-bench.sh" --trial --detach 2>"$SB/detach.err" | tail -1)"
+DRUN="$(GVPN_DETACH_WITH=nohup timeout 30 bash "$KIT/bench/gvpn-bench.sh" --trial --detach 2>"$SB/detach.err" | tail -1)"
 sleep 2
 st="$( . "$KIT/lib/common.sh"; gvpn_lock_state; echo "$GVPN_LOCK_STATE $GVPN_LOCK_RUN" )"
 [ "$st" = "live $DRUN" ] && ok "a detached run holds a live lock" || bad "detached run: lock is '$st', want 'live $DRUN'"
@@ -145,6 +162,21 @@ for _ in $(seq 120); do [ -f "$DRUN/finished.json" ] && break; sleep 1; done
 sleep 1
 [ -f "$DRUN/finished.json" ] && [ ! -e "$SB/state/run.lock" ] && ok "the detached run finished and released the lock" \
   || bad "detached run: finished=$([ -f "$DRUN/finished.json" ] && echo y || echo n), lock=$(readlink "$SB/state/run.lock" 2>/dev/null)"
+
+# A detached bench runs as a systemd unit. SIGKILL skips its cleanup, and the
+# unit's ExecStopPost must still put the node back and release the lock -- the
+# state two killed launches left the VM in.
+KRUN="$(GVPN_DETACH_WITH=systemd timeout 30 bash "$KIT/bench/gvpn-bench.sh" --trial --detach 2>/dev/null | tail -1)"
+for _ in $(seq 60); do [ "$(readlink "$SB/etc/config.toml")" = "$SB/etc/config-gvpn-arm.toml" ] && break; sleep 1; done
+kill -9 "$(cat "$KRUN/bench.pid")" 2>/dev/null
+for _ in $(seq 60); do [ -f "$KRUN/finished.json" ] && break; sleep 1; done
+sleep 1
+grep -q '"killed"' "$KRUN/finished.json" 2>/dev/null && grep -q 'KILLED before its cleanup' "$KRUN/run.log" \
+  && ok "a SIGKILLed detached run is recorded as killed" || bad "kill not recorded: $(cat "$KRUN/finished.json" 2>/dev/null)"
+[ "$(readlink "$SB/etc/config.toml")" = "$SB/etc/config-jura-prod.toml" ] && [ ! -e "$SB/state/run.lock" ] \
+  && ok "...and its exit hook restored the network config and released the lock" \
+  || bad "after the kill: config -> $(readlink "$SB/etc/config.toml"), lock -> $(readlink "$SB/state/run.lock" 2>/dev/null)"
+pkill -f "$KRUN" 2>/dev/null; sleep 1
 
 # An abort before cleanup() is installed -- how the first trial died, on an
 # unbound variable -- must still release the lock, or every push is refused.

@@ -883,21 +883,36 @@ SUMMARY="$RUN_DIR/summary.csv"
 
 if [ "$DETACH" = 1 ]; then
   export GVPN_RUN_ID="$RUN_ID"
-  command -v setsid >/dev/null 2>&1 && SETSID=setsid || SETSID=""
-  nohup $SETSID "$0" --profile custom ${TRIAL:+$([ "$TRIAL" = 1 ] && echo --trial)} \
-        --arms-dir "$ARMS_DIR" -a "$ARMS" -n "$CYCLES" \
-        --mode "$MODE" --leg-timeout "$LEG_TIMEOUT" --reps "$REPS" --rep-gap "$REP_GAP" \
-        --udp-seconds "$UDP_SECONDS" --udp-rate "$UDP_RATE" \
-        ${DURATION:+--duration "$DURATION"} \
-        ${DL_BYTES:+--dl-bytes "$DL_BYTES"} ${UL_BYTES:+--ul-bytes "$UL_BYTES"} \
-        ${DL_SECONDS:+--dl-seconds "$DL_SECONDS"} ${UL_SECONDS:+--ul-seconds "$UL_SECONDS"} \
-        --target "$TARGET" ${DL_URL:+--url "$DL_URL"} ${UL_URL:+--url-up "$UL_URL"} \
-        ${UDP_HOST:+--udp-host "$UDP_HOST"} \
-        ${IPERF_SERVER:+-s "$IPERF_SERVER"} --iperf-port "$IPERF_PORT" \
-        -o "$OUT_ROOT" \
-        ${DESTINATION:+-D "$DESTINATION"} \
-        >>"$RUN_DIR/detached.log" 2>&1 </dev/null &
-  echo $! > "$RUN_DIR/bench.pid"   # the lock now belongs to the child (nohup/setsid exec it)
+  args=(--profile custom ${TRIAL:+$([ "$TRIAL" = 1 ] && echo --trial)}
+        --arms-dir "$ARMS_DIR" -a "$ARMS" -n "$CYCLES"
+        --mode "$MODE" --leg-timeout "$LEG_TIMEOUT" --reps "$REPS" --rep-gap "$REP_GAP"
+        --udp-seconds "$UDP_SECONDS" --udp-rate "$UDP_RATE"
+        ${DURATION:+--duration "$DURATION"}
+        ${DL_BYTES:+--dl-bytes "$DL_BYTES"} ${UL_BYTES:+--ul-bytes "$UL_BYTES"}
+        ${DL_SECONDS:+--dl-seconds "$DL_SECONDS"} ${UL_SECONDS:+--ul-seconds "$UL_SECONDS"}
+        --target "$TARGET" ${DL_URL:+--url "$DL_URL"} ${UL_URL:+--url-up "$UL_URL"}
+        ${UDP_HOST:+--udp-host "$UDP_HOST"}
+        ${IPERF_SERVER:+-s "$IPERF_SERVER"} --iperf-port "$IPERF_PORT"
+        -o "$OUT_ROOT" ${DESTINATION:+-D "$DESTINATION"})
+  self="$KIT/bench/gvpn-bench.sh"
+  if [ "${GVPN_DETACH_WITH:-}" = systemd ] || { [ -z "${GVPN_DETACH_WITH:-}" ] \
+       && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
+    # A transient system service, not a child of the SSH login: a logout cannot
+    # kill it, and ExecStopPost puts the node back however the bench ends.
+    envs=()
+    while IFS= read -r kv; do envs+=(--setenv "$kv"); done \
+      < <(env | grep -E '^(GVPN_[A-Z_]*|GNOSISVPN_[A-Z_]*|SUDO_USER|HOME|PATH|RUST_LOG)=')
+    systemd-run --quiet --collect --unit "gvpn-bench-$RUN_ID" --working-directory "$KIT" \
+      -p "StandardOutput=append:$RUN_DIR/detached.log" -p "StandardError=append:$RUN_DIR/detached.log" \
+      -p "ExecStopPost=$KIT/bench/on-bench-exit.sh $RUN_DIR" \
+      "${envs[@]}" "$self" "${args[@]}" || { echo "systemd-run failed" >&2; exit 1; }
+    # keep the lock live until the unit's bench has written its own PID
+    for _ in $(seq 30); do [ "$(cat "$RUN_DIR/bench.pid" 2>/dev/null)" != "$$" ] && break; sleep 1; done
+  else
+    command -v setsid >/dev/null 2>&1 && SETSID=setsid || SETSID=""
+    nohup $SETSID "$self" "${args[@]}" >>"$RUN_DIR/detached.log" 2>&1 </dev/null &
+    echo $! > "$RUN_DIR/bench.pid"   # nohup/setsid exec the child: same PID
+  fi
   trap - EXIT
   echo "$RUN_DIR"; exit 0
 fi

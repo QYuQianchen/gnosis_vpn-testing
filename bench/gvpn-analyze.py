@@ -714,6 +714,9 @@ def main():
     if finished.get("exit") not in (None, 0):
         out.append(f"            WARNING: the run exited non-zero ({finished['exit']}) — "
                    f"it may have been cut short.")
+    if finished.get("killed"):
+        out.append(f"            WARNING: the run was killed before its cleanup ({finished['killed']}) — "
+                   f"it stopped early; report what completed, not the planned schedule.")
     out.append("")
 
     # ------------------------------------------------------- 1. headline --
