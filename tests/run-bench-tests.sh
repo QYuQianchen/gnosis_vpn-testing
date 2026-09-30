@@ -69,7 +69,11 @@ while [ $# -gt 0 ]; do
   case "$1" in -o) out="$2"; shift 2 ;; -X) up=1; shift 2 ;; -w|--data-binary|--max-time|-r) shift 2 ;;
                -*) shift ;; *) url="$1"; shift ;; esac
 done
-if [ "$up" = 1 ]; then echo "5242880 2.0"; exit 0; fi
+case "$url" in *[{}]*) echo "curl: (3) unmatched close brace/bracket in URL" >&2; exit 3 ;; esac  # as real curl
+if [ "$up" = 1 ]; then echo "200 5242880 2.0"; exit 0; fi
+if [ -f "${FAKE_DL_FAIL:-/nonexistent}" ]; then   # an endpoint refusing the download
+  echo "error code: 1020" > "$out"; echo "curl: (22) The requested URL returned error: 403" >&2; exit 22
+fi
 n=$(printf '%s' "$url" | sed -n 's/.*bytes=\([0-9]*\).*/\1/p'); n=${n:-5242880}
 head -c $((n / 2)) /dev/zero > "$out"; sleep 1
 head -c "$n" /dev/zero > "$out"; sleep 1
@@ -177,6 +181,18 @@ grep -q '"killed"' "$KRUN/finished.json" 2>/dev/null && grep -q 'KILLED before i
   && ok "...and its exit hook restored the network config and released the lock" \
   || bad "after the kill: config -> $(readlink "$SB/etc/config.toml"), lock -> $(readlink "$SB/state/run.lock" 2>/dev/null)"
 pkill -f "$KRUN" 2>/dev/null; sleep 1
+
+# A download the endpoint refuses is a FAILED leg: excluded and named, never
+# scored as a 0 Mbit/s session (the 2026.09.28 trial read "median 0.00, 100% below").
+touch "$SB/dl-fail"
+FRUN="$(GVPN_DETACH_WITH=nohup FAKE_DL_FAIL="$SB/dl-fail" timeout 300 bash "$KIT/bench/gvpn-bench.sh" --trial 2>/dev/null | grep -o "$SB/state/runs/[0-9-]*" | head -1)"
+FRUN="${FRUN:-$(ls -1dt "$SB/state/runs"/*/ | head -1)}"; FRUN="${FRUN%/}"
+rm -f "$SB/dl-fail"
+grep -q 'download FAILED: curl exit 22' "$FRUN/run.log" && ok "a refused download is logged as FAILED" \
+  || bad "refused download not logged: $(grep -m1 'rep 1' "$FRUN/run.log")"
+out="$(python3 "$KIT/bench/gvpn-analyze.py" "$FRUN" 2>&1)"
+case "$out" in *"download(s) failed -- curl exit 22"*) ok "the report excludes it and names why, instead of 0 Mbit/s" ;;
+  *) bad "report on refused downloads: $(printf '%s' "$out" | grep -m2 -E 'median|failed|usable')" ;; esac
 
 # An abort before cleanup() is installed -- how the first trial died, on an
 # unbound variable -- must still release the lock, or every push is refused.

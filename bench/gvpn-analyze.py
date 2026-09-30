@@ -53,6 +53,7 @@ import textwrap
 from pathlib import Path
 
 FLOOR_MBPS_DEFAULT = 2.0
+LEG_FAILURES = []  # reasons, filled by analyse_session
 SLOW_START_DROP_S = 5
 MIN_SAMPLES = 3
 
@@ -210,7 +211,40 @@ def steady(iv, nbytes, secs):
     return (iv[-1:] if iv else []), True
 
 
+EXPECTED_DL = None  # bytes-mode download size, from the manifest
+
+
+def parse_bytes(v):
+    """'25M' -> 26214400, as gvpn-bench.sh's parse_bytes (binary units)."""
+    v = str(v or "").rstrip("Bb")
+    mult = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30}.get(v[-1:].lower(), 1)
+    try:
+        return int(float(v[:-1] if mult > 1 else v) * mult)
+    except ValueError:
+        return None
+
+
+def leg_failure(rd: Path):
+    """Why a download failed, or None. A failed leg is not a slow session: scoring
+    its error page as 0 Mbit/s would fake a floor. Runs from kits before the
+    .failed marker are caught by the byte count: short of the requested size
+    without a timeout means the transfer never happened."""
+    f = rd / "iperf-down.failed"
+    if f.exists():
+        return f.read_text(errors="ignore").strip().splitlines()[0]
+    if EXPECTED_DL and not (rd / "iperf-down.timeout").exists():
+        _, got, _ = load_iperf(rd / "iperf-down.json")
+        if got is not None and got < EXPECTED_DL:
+            err = (rd / "iperf-down.err")
+            why = err.read_text(errors="ignore").strip().splitlines()[:1] if err.exists() else []
+            return f"only {got} of {EXPECTED_DL} bytes arrived" + (f" ({why[0]})" if why else "")
+    return None
+
+
 def analyse_rep(rd: Path):
+    why = leg_failure(rd)
+    if why:
+        return {"rep_dir": str(rd), "usable": False, "timed_out": False, "failed": why}
     down_iv, dbytes, dsecs = load_iperf(rd / "iperf-down.json")
     down, short = steady(down_iv, dbytes, dsecs)
     up_iv, ubytes, usecs = load_iperf(rd / "iperf-up.json")
@@ -250,6 +284,9 @@ def analyse_session(sdir: Path):
         rep_dirs = [sdir]  # tolerate a run from an older bench version
 
     reps = [analyse_rep(rd) for rd in rep_dirs]
+    for r in reps:
+        if r.get("failed"):
+            LEG_FAILURES.append(r["failed"])
     usable = [r for r in reps if r.get("usable")]
     if not usable:
         return None
@@ -531,6 +568,9 @@ def main():
                       f"({args.floor_mbps:g}); the study recorded {recorded_floor:g}. "
                       f"Say which one a quoted 'below' figure used.")
 
+    global EXPECTED_DL
+    if manifest.get("mode") == "bytes":
+        EXPECTED_DL = parse_bytes(manifest.get("dl_bytes"))
     by_arm, rows = {}, []
 
     def bucket(a):
@@ -561,7 +601,8 @@ def main():
         return
 
     if not rows:
-        sys.exit("no usable sessions in this run")
+        sys.exit("no usable sessions in this run"
+                 + (f": {len(LEG_FAILURES)} download(s) failed -- {LEG_FAILURES[0]}" if LEG_FAILURES else ""))
 
     if args.csv:
         flat = [{k: v for k, v in r.items() if k not in ("reps", "rep_medians")} for r in rows]
@@ -970,6 +1011,10 @@ def main():
     if n_min < 30:
         caveats.append(f"Smallest arm has {n_min} usable sessions. Tail statistics are not "
                        f"trustworthy below ~30 — signal check, not a result.")
+    if LEG_FAILURES:
+        caveats.append(f"{len(LEG_FAILURES)} download(s) FAILED and were excluded, not scored: "
+                       f"{LEG_FAILURES[0]}. Check the endpoint (GVPN_DL_URL) before trusting "
+                       f"any number here.")
     n_short = sum(r.get("short_reps", 0) for r in rows)
     if n_short and not is_trial:
         caveats.append(f"{n_short} transfer(s) finished within the {SLOW_START_DROP_S} s "

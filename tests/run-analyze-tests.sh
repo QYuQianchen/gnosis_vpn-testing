@@ -103,6 +103,25 @@ sys.exit(0 if r["usable"] and r["short"] and abs(r["down_median"] - 20.0) < 1e-6
          and r["stall_rate"] is None and r["tail_spread"] is None else 1)
 EOF
 
+# A download that errored (a kit before the .failed marker: only the byte count
+# says so) must be excluded as a failure, not scored as 0 Mbit/s -- the
+# 2026.09.28 trial read "median 0.00, 100% below" with working uploads.
+python3 - "$KIT" <<'EOF' && printf '  ok    failed   an errored download is a failure, not 0 Mbit/s\n' || { printf '  FAIL  failed   an errored download was scored\n'; fail=1; }
+import importlib.util, json, sys, tempfile, pathlib
+spec = importlib.util.spec_from_file_location("a", sys.argv[1] + "/bench/gvpn-analyze.py")
+a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+a.EXPECTED_DL = a.parse_bytes("5M")
+d = pathlib.Path(tempfile.mkdtemp())
+(d / "iperf-down.json").write_text(json.dumps({"intervals": [{"sum": {"bits_per_second": 2400}}],
+    "end": {"sum_received": {"bytes": 300, "seconds": 1.1}}}))
+(d / "iperf-down.err").write_text("curl: (22) The requested URL returned error: 403\n")
+r = a.analyse_rep(d)
+ok = (not r["usable"]) and "only 300 of 5242880 bytes" in r["failed"] and "403" in r["failed"]
+(d / "iperf-down.timeout").write_text("leg-timeout")   # ran out of time instead: that is data
+ok = ok and a.analyse_rep(d)["usable"]
+sys.exit(0 if ok and a.parse_bytes("25M") == 26214400 else 1)
+EOF
+
 grep -q 'WARNING' "$TMP/broken.md" || { printf '  FAIL  broken   markdown carries the warning\n'; fail=1; }
 grep -q 'slow 10%' "$TMP/win.md"   || { printf '  FAIL  win      markdown has the headline table\n'; fail=1; }
 

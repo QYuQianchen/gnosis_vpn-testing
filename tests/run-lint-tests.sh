@@ -18,6 +18,12 @@ else
   printf '  FAIL  variables used without a default and never assigned:\n%s\n' "$out"; fail=1
 fi
 
+# A literal "{...}" inside a ${VAR:-default} closes the expansion at its "}" and
+# appends a stray "}" -- every download URL of three runs ended in "}".
+hits="$(grep -nE '\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+][^}$]*\{' bench/*.sh setup/*.sh tools/*.sh lib/*.sh || true)"
+[ -z "$hits" ] && printf '  ok    no literal brace inside a ${VAR:-default}\n' \
+  || { printf '  FAIL  literal brace inside a ${VAR:-default} (the "}" ends the expansion):\n%s\n' "$hits"; fail=1; }
+
 # canary: the checker must still catch the bug it exists for
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 printf '#!/bin/bash\nset -u\nRUN_LOG=x\ntouch "$CODES_LEDGER"\n: > "$RUN_LOG"\n' > "$TMP/canary.sh"

@@ -30,6 +30,27 @@ move a number or break a node — not for docs or comments.
   VM's `.git/hooks`, which a push does not update: re-run
   `./setup/06-git-deploy.sh` once to install it. `tests/run-lock-tests.sh`
   covers every state in all three copies of the test.
+- **Every download so far failed: the URL ended in a stray `}`.**
+  `DL_URL="${GVPN_DL_URL:-…?bytes={bytes}}"` -- the first `}` closes the
+  expansion, so the value from `gvpn.conf` got a literal `}` appended and curl
+  rejected `…?bytes=5242880}` (exit 3) in about a second. Same in `use-arm.sh`,
+  whose 90 s traffic pull therefore never ran (the candidate counts are
+  unaffected: connecting alone makes the planner build its paths). Every
+  download figure recorded before this fix is invalid; uploads and candidate
+  counts are fine. The default now lives in its own variable; preflight fetches
+  both endpoints directly and fails on a bad one; the lint rejects a literal
+  brace inside `${VAR:-…}`; the test curl rejects braces like real curl.
+- **A failed download was scored as a 0 Mbit/s session.** The 2026.09.28 trial
+  read "median 0.00, 100% below 2 Mbit/s" with uploads at 6-7 Mbit/s: every
+  download ended at once (an HTTP or transport error), and the bench recorded
+  the error page's few bytes as a completed transfer. A leg that errors -- curl
+  failing, fewer bytes than asked without a timeout, a non-2xx upload -- is now
+  `iperf-*.failed` with curl's reason, logged as `download FAILED`, excluded by
+  the analyzer and named in its caveats, and fails preflight's trial. A leg that
+  merely ran out of time is still data (a slow session). Any floor calibrated
+  from such a run is 0 and must be cleared. Runs from earlier kits, which have
+  no marker, are caught by the byte count: fewer bytes than requested and no
+  timeout is a failure, with curl's error quoted.
 - **`05-set-version.sh --apply` aborted: `GVPN_STATE: unbound variable`.** Moving
   `BUILD.txt` into the state dir made the script use `$GVPN_STATE` without
   sourcing `lib/common.sh`, which defines it. It sources it now, and always
@@ -160,6 +181,8 @@ move a number or break a node — not for docs or comments.
 
 ### Changed
 
+- `studies/2026-09-28-transfers-25mb.conf`: the 25 MB study on build
+  `2026.09.28+build.013542`, floor empty so preflight recalibrates it.
 - Defaults: `GVPN_CHANNEL=snapshot`, `GVPN_NETWORK=jura-prod`,
   `GVPN_PIN_VERSION=2026.09.28+build.013542`, in `gvpn.conf` and the shipped
   study. A study that assigns `GVPN_PIN_VERSION`, even empty, overrides

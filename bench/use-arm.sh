@@ -149,8 +149,9 @@ echo "    connect: $("$CTL" connect "$DEST" 2>&1 | head -2 | tr '\n' ' ')"
 wait_for "$CONNECT_TIMEOUT" "^Connected to $DEST " 1 || { "$CTL" disconnect >/dev/null 2>&1 || true; exit 1; }
 
 echo "    connected; pulling traffic for ${SETTLE}s"
-url="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
-curl -s -o /dev/null --max-time "$SETTLE" "${url//\{bytes\}/2000000000}" || true
+url_default='https://speed.cloudflare.com/__down?bytes={bytes}'   # not inline: see gvpn-bench.sh
+url="${GVPN_DL_URL:-$url_default}"
+curl -s -o /dev/null --max-time "$SETTLE" "${url//\{bytes\}/99000000}" || true   # Cloudflare caps __down near 1e8
 "$CTL" disconnect >/dev/null 2>&1 || true
 
 r="$(python3 "$GVPN_KIT/lib/routes.py" "$GVPN_SERVICE_LOG" --from-byte "$log_from")"

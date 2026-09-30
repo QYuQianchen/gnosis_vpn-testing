@@ -83,8 +83,9 @@ done
 STUDY_FILE="$KIT/studies/$STUDY.conf"
 [ -f "$STUDY_FILE" ] || { echo "no such study: $STUDY_FILE" >&2; exit 2; }
 
-# shellcheck disable=SC1090
-. "$STUDY_FILE"
+# gvpn.conf, then the study on top -- the same order the bench reads them in, so
+# preflight checks the settings the run will actually use.
+GVPN_STUDY="$STUDY" gvpn_load_conf || exit 2
 
 ARMS="${ARMS_OVERRIDE:-${GVPN_ARMS:-}}"
 [ -n "$ARMS" ] || { echo "study sets no GVPN_ARMS and none given" >&2; exit 2; }
@@ -247,6 +248,29 @@ else
   note "the gateway is not on-link. fix: sudo ./setup/00-vm-setup.sh (adds a link route for it)"
 fi
 
+# The transfer endpoints, fetched directly (not through the tunnel): a URL that
+# cannot work here cannot work in a session, and every download of three runs
+# failed on a malformed URL without anything saying so.
+dl_default='https://speed.cloudflare.com/__down?bytes={bytes}'
+if [ "${GVPN_TARGET:-url}" = url ]; then
+  dl="${GVPN_DL_URL:-$dl_default}"; dl="${dl//\{bytes\}/1024}"
+  if [ "$dl" != "${dl//[\{\}]/}" ]; then
+    bad "download URL still contains a brace after substitution: $dl"
+  elif got=$(curl -sS -o /dev/null -w '%{http_code} %{size_download}' --max-time 20 -r 0-1023 "$dl" 2>&1) \
+       && [ "${got%% *}" -ge 200 ] && [ "${got%% *}" -lt 300 ] && [ "${got#* }" -ge 1024 ]; then
+    pass "download endpoint answers (${dl%%\?*}: HTTP ${got%% *})"
+  else
+    bad "download endpoint failed: $dl -> ${got:-no answer}"
+    note "set GVPN_DL_URL in gvpn.conf to a URL that serves N bytes ({bytes}) or honours Range"
+  fi
+  if [ -n "${GVPN_UL_URL-https://speed.cloudflare.com/__up}" ]; then
+    ul="${GVPN_UL_URL:-https://speed.cloudflare.com/__up}"
+    code=$(head -c 1024 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST --data-binary @- "$ul" 2>&1)
+    case "$code" in 2??) pass "upload endpoint answers (HTTP $code)" ;;
+                    *)   bad "upload endpoint failed: $ul -> $code" ;; esac
+  fi
+fi
+
 FREE_GB=$(df -BG --output=avail "$GVPN_STATE" 2>/dev/null | tail -1 | tr -dc '0-9')
 if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt 20 ]; then
   warn "only ${FREE_GB}G free in $GVPN_STATE -- planner DEBUG runs ~100 MB/hour"
@@ -351,7 +375,13 @@ else
   else
     bad "trial run produced no summary.csv ($TRIAL_RUN)"
   fi
-  [ "$fails" -eq 0 ] || die "$fails arm(s) failed the trial."
+  failed_leg="$(find "$TRIAL_RUN" -name '*.failed' 2>/dev/null | head -1)"
+  if [ -n "$failed_leg" ]; then
+    bad "a transfer FAILED in the trial: $(head -1 "$failed_leg")"
+    note "$(sed -n '2,3p' "$failed_leg" | head -c 200)"
+    note "check GVPN_DL_URL / GVPN_UL_URL through the tunnel; see $failed_leg"
+  fi
+  [ "$fails" -eq 0 ] || die "$fails check(s) failed in the trial."
 
   # Render the report too. A trial that cannot be read is only half a rehearsal,
   # and the analyzer marks a trial as un-scoreable so this can never be mistaken

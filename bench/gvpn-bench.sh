@@ -150,7 +150,10 @@ FLUSH_TCP_METRICS="${GVPN_FLUSH_TCP_METRICS:-1}"
 TARGET="${GVPN_TARGET:-url}"             # url (no second machine) | iperf3
 # {bytes} is substituted with the wanted volume. Cloudflare's endpoint returns
 # exactly N bytes, which is what makes bytes-mode exact without Range requests.
-DL_URL="${GVPN_DL_URL:-https://speed.cloudflare.com/__down?bytes={bytes}}"
+# (Not inline in ${VAR:-...}: the first "}" would close the expansion, and a
+# trailing "}" was appended to every URL -- curl refused them all.)
+DL_URL_DEFAULT='https://speed.cloudflare.com/__down?bytes={bytes}'
+DL_URL="${GVPN_DL_URL:-$DL_URL_DEFAULT}"
 # Cloudflare's speedtest upload endpoint, so url mode measures BOTH directions
 # without a second machine. Set empty to skip the upload leg.
 UL_URL="${GVPN_UL_URL:-https://speed.cloudflare.com/__up}"
@@ -608,9 +611,18 @@ curl_leg() {  # curl_leg OUTFILE
     # Reaching the byte target is a completed leg; running out of time is not.
     [ "$enough" = 1 ] || echo "leg-timeout" > "${out%.json}.timeout"
   fi
-  wait "$cpid" 2>/dev/null || true
+  local rc=0
+  wait "$cpid" 2>/dev/null || rc=$?
   t1=$(date +%s.%N)
   local got; got=$(stat -c %s "$tmp" 2>/dev/null || echo 0)
+  # An HTTP or transport error is a FAILED leg, not a slow one: scored as data,
+  # an error page read as a 0 Mbit/s session and counted towards the floor rate.
+  # (A leg we stopped -- target reached, or out of time -- is data.)
+  if [ "$enough" != 1 ] && [ ! -f "${out%.json}.timeout" ] \
+     && { { [ "$rc" -ne 0 ] && [ "$rc" -ne 28 ]; } || { [ "$MODE" = bytes ] && [ "$got" -lt "$DL_B" ]; }; }; then
+    { echo "curl exit $rc, $got of ${DL_B:-?} bytes"; head -c 300 "${out%.json}.err"; echo
+      head -c 200 "$tmp" 2>/dev/null | tr -cd '[:print:]\n'; } > "${out%.json}.failed"
+  fi
   # Never report more than was asked for, so completion time and volume agree.
   [ "$MODE" = bytes ] && [ "$got" -gt "$DL_B" ] && got="$DL_B"
   rm -f "$tmp"
@@ -641,11 +653,17 @@ curl_up_leg() {  # curl_up_leg OUTFILE
   [ -n "$UL_URL" ] || return 0
   tmp=$(mktemp "${TMPDIR:-/tmp}/gvpn-ul.XXXXXX")
   head -c "$UL_B" /dev/zero > "$tmp" 2>/dev/null
-  local res
+  local res rc=0 code
   res=$(run_timeout "$LEG_TIMEOUT" curl -sS -o /dev/null -X POST \
-          --data-binary "@$tmp" -w '%{size_upload} %{time_total}' "$UL_URL" \
-          2>"${out%.json}.err") || echo "leg-timeout" > "${out%.json}.timeout"
+          --data-binary "@$tmp" -w '%{http_code} %{size_upload} %{time_total}' "$UL_URL" \
+          2>"${out%.json}.err") || rc=$?
   rm -f "$tmp"
+  code="${res%% *}"; res="${res#* }"
+  if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then        # run_timeout stopped it
+    echo "leg-timeout" > "${out%.json}.timeout"
+  elif [ "$rc" -ne 0 ] || [ "${code:0:1}" != 2 ]; then
+    { echo "curl exit $rc, HTTP ${code:-?}"; head -c 300 "${out%.json}.err"; } > "${out%.json}.failed"
+  fi
   python3 - "$out" "${res:-0 0}" <<'PYEOF'
 import json, sys
 out = sys.argv[1]
@@ -983,11 +1001,13 @@ run_reps() {  # run_reps SESSION_DIR
     log "    rep $r/$REPS: download"
     echo "$(stamp)" > "$rd/t_dl_start"
     transfer_leg "$rd/iperf-down.json" down
+    [ -f "$rd/iperf-down.failed" ] && log "      download FAILED: $(head -1 "$rd/iperf-down.failed")"
     sleep 5
 
     log "    rep $r/$REPS: upload"
     echo "$(stamp)" > "$rd/t_ul_start"
     transfer_leg "$rd/iperf-up.json" up
+    [ -f "$rd/iperf-up.failed" ] && log "      upload FAILED: $(head -1 "$rd/iperf-up.failed")"
 
     if [ "${UDP_SECONDS:-0}" -gt 0 ]; then
       sleep 3
