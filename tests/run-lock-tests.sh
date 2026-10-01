@@ -6,6 +6,13 @@
 # the lock behind, and the hook then refused every push until it was removed by
 # hand.
 set -uo pipefail
+# The bench and its lock are VM tools: GNU timeout/sed/stat, /proc. On macOS,
+# skip (as the routing suite does) and run the whole suite with `make test-vm`.
+if [ "$(uname -s)" != Linux ]; then
+  echo "lock"
+  echo "  skip  needs Linux (GNU timeout, sed, stat; /proc) -- run everything on the VM: make test-vm"
+  echo; echo "all lock tests passed (skipped)"; exit 0
+fi
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 SB="$(mktemp -d)"; trap 'kill $LIVE 2>/dev/null; rm -rf "$SB"' EXIT
 export GVPN_STATE="$SB/state" GVPN_RUN_LOCK="$SB/state/run.lock"

@@ -655,6 +655,10 @@ def main():
     broken_pins = [a for a in pinned if a in stats and stats[a]["relays"] is not None
                    and stats[a]["relays"] > 1.5]
     pin_broken = bool(broken_pins)
+    # A pinned arm with no planner lines is UNVERIFIED, not passed: "-" is not 1.
+    unverified = {a: sum(1 for x in by_arm[a]["sessions"] if x.get("relays") is None)
+                  for a in pinned if a in by_arm and by_arm[a]["sessions"]}
+    unverified = {a: (k, len(by_arm[a]["sessions"])) for a, k in unverified.items() if k}
 
     # A trial is a rehearsal of the pipeline, not a measurement of anything: one
     # cycle of 5 MB transfers. It outranks every other verdict because the whole
@@ -999,6 +1003,10 @@ def main():
                        "It proves the arms load and data moves. It cannot "
                        "support any comparison between arms — re-run without "
                        "--trial for that.")
+    for a, (k, n) in unverified.items():
+        caveats.append(f"'{a}': no planner lines in {k} of {n} session(s), so the pin is "
+                       f"NOT VERIFIED there. Check planner DEBUG logging "
+                       f"(`make count ARM={a}` must read candidates=1).")
     for a in broken_pins:
         caveats.append(f"'{a}' drew from {stats[a]['relays']:.1f} candidate paths, not 1. "
                        f"Its [connection.path_planner] override is not applied — check "

@@ -92,13 +92,13 @@ not one path for the whole session.
 
 ## 4 · Run a study
 
-A study is one file in `studies/`. The one that ships — `2026-09-24-transfers-25mb`
+A study is one file in `studies/`. The one that ships — `2026-09-28-transfers-25mb`
 — is 2 arms × 1 exit × 30 cycles of 25 MB, about 3 hours, pinned to
 `snapshot` / `jura-prod` / `2026.09.28+build.013542`. Leave `GVPN_FLOOR_MBPS`
 empty; preflight measures it.
 
 ```sh
-[VM] sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --trial-only
+[VM] sudo -E ./bench/preflight.sh --study 2026-09-28-transfers-25mb --trial-only
 ```
 
 Preflight refuses to run if the installed version differs from the pinned one,
@@ -109,7 +109,7 @@ for starting a study on a new build.) `--trial-only` runs the whole study at
 `TRIAL RUN` and cannot be quoted.
 
 ```sh
-[VM] make launch STUDY=2026-09-24-transfers-25mb
+[VM] make launch STUDY=2026-09-28-transfers-25mb
 ```
 
 Re-checks everything, calibrates the floor threshold from `auto` alone (so the
@@ -127,9 +127,9 @@ At the end the node is put back on its network config automatically.
 
 ```sh
 [VM]  make report
-[VM]  make publish STUDY=2026-09-24-transfers-25mb
-[Mac] scp -r gvpn-vm:gvpn-8408/results/2026-09-24-transfers-25mb results/
-[Mac] scp gvpn-vm:gvpn-8408/studies/2026-09-24-transfers-25mb.conf studies/
+[VM]  make publish STUDY=2026-09-28-transfers-25mb
+[Mac] scp -r gvpn-vm:gvpn-8408/results/2026-09-28-transfers-25mb results/
+[Mac] scp gvpn-vm:gvpn-8408/studies/2026-09-28-transfers-25mb.conf studies/
 [Mac] git add results/ studies/ && git commit -m "results: …" && make push
 ```
 
@@ -202,7 +202,8 @@ To put the network config back after an arm, without repairing anything:
 ```sh
 [Mac] ssh gvpn-vm 'cd gvpn-8408 && make status'   # nothing may be running
 [Mac] tar xzf gvpn-8408-kit.tar.gz --strip-components=1 -C <your clone>
-[Mac] make test && git add -A && git commit -m "kit: …" && make push
+[Mac] make test && make test-vm      # macOS skips the Linux-only suites; test-vm runs all of them on the VM
+[Mac] git add -A && git commit -m "kit: …" && make push
 [VM]  make arms                            # arms are rendered by the kit, so re-render
 ```
 

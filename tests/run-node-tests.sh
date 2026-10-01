@@ -43,6 +43,14 @@ cat > "$SB/bin/apt-get" <<EOF
 #!/bin/sh
 [ -e "$NET" ] || cp "$PRISTINE" "$NET"
 EOF
+# The scripts refuse to run without root; everything they touch here is in the
+# sandbox, so let them through without sudo (this suite used to pass only as root).
+REAL_ID="$(command -v id)"
+cat > "$SB/bin/id" <<EOF
+#!/bin/sh
+[ "\$1" = -u ] && { echo 0; exit 0; }
+exec "$REAL_ID" "\$@"
+EOF
 chmod +x "$SB/bin/"*
 export PATH="$SB/bin:$PATH" GVPN_CONFIG_DIR="$SB/etc" GNOSISVPN_CONFIG_PATH="$SB/etc/config.toml" \
        GVPN_SERVICE_LOG="$SB/log/g.log" GVPN_STATE="$SB/state" GVPN_DESTINATION=UK

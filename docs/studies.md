@@ -74,7 +74,7 @@ channel set changes it for every other arm in the run.
 All five interleave in one run; none touches channels or identity.
 
 ```sh
-make launch STUDY=2026-09-24-transfers-25mb
+make launch STUDY=2026-09-28-transfers-25mb
 ```
 
 `zero-hop` needs `--allow-insecure` and sends with no relay, so the exit sees

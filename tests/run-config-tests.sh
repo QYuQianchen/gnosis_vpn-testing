@@ -7,6 +7,13 @@
 # will not start. Every arm template is rendered here and must parse.
 set -uo pipefail
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
+# Asserting values needs a TOML parser: Python >= 3.11 (tomllib) or tomli. macOS's
+# /usr/bin/python3 is older -- skip rather than fail; the VM always has one.
+if ! python3 -c 'import tomllib' 2>/dev/null && ! python3 -c 'import tomli' 2>/dev/null; then
+  echo "config rendering"
+  echo "  skip  python3 $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])') has no TOML parser (needs >= 3.11, or: pip install tomli) -- or: make test-vm"
+  echo; echo "all config tests passed (skipped)"; exit 0
+fi
 M="$KIT/lib/tomlmerge.py"
 BASE="$KIT/tests/fixtures/config-network.toml"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -17,7 +24,11 @@ bad() { printf '  FAIL  %s\n' "$*"; fail=1; }
 
 val() {  # val FILE dotted.key  -> the parsed value, or <missing>
   python3 - "$1" "$2" <<'PY'
-import sys, tomllib
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 t = tomllib.load(open(sys.argv[1], "rb"))
 for p in sys.argv[2].split("."):
     if not isinstance(t, dict) or p not in t:
@@ -65,7 +76,10 @@ f="$TMP/auto.toml"
 f="$TMP/_pin-cfg.toml"
 [ "$(val "$f" strategy.min_open_channels)" = 1 ]                  && ok "pin-cfg: strategy merged into the existing table" || bad "pin-cfg: strategy merge"
 [ "$(val "$f" strategy.channel_allowlist.enabled)" = True ]       && ok "pin-cfg: allowlist enabled" || bad "pin-cfg: allowlist"
-python3 -c "import tomllib,sys; p=tomllib.load(open('$f','rb'))['strategy']['channel_allowlist']['peers']; sys.exit(p!=['$RELAY'])" \
+python3 -c "import sys
+try: import tomllib
+except ModuleNotFoundError: import tomli as tomllib
+p=tomllib.load(open('$f','rb'))['strategy']['channel_allowlist']['peers']; sys.exit(p!=['$RELAY'])" \
   && ok "pin-cfg: multi-line peers array replaced, not appended to" || bad "pin-cfg: peers"
 
 # 4. destinations: only the chosen one, with the forced hop count

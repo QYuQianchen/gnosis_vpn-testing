@@ -8,6 +8,13 @@
 # shipped with a variable used but no longer assigned; under `set -u` the first
 # real trial died on it.
 set -uo pipefail
+# The bench and its lock are VM tools: GNU timeout/sed/stat, /proc. On macOS,
+# skip (as the routing suite does) and run the whole suite with `make test-vm`.
+if [ "$(uname -s)" != Linux ]; then
+  echo "bench"
+  echo "  skip  needs Linux (GNU timeout, sed, stat; /proc) -- run everything on the VM: make test-vm"
+  echo; echo "all bench tests passed (skipped)"; exit 0
+fi
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 SB="$(cd "$(mktemp -d)" && pwd -P)"; trap '[ -n "${KEEP:-}" ] && echo "sandbox kept: $SB" || rm -rf "$SB"' EXIT
 mkdir -p "$SB/bin" "$SB/etc" "$SB/log" "$SB/state"
@@ -22,14 +29,16 @@ S="$SB/ctl.state"; [ -f "\$S" ] || echo idle > "\$S"
 while [ "\${1:-}" = "-o" ]; do shift 2; done
 cfg="\$(readlink -f "$SB/etc/config.toml")"
 case "\${1:-}" in
-  start-client) echo ready > "\$S" ;;
-  stop-client)  echo idle > "\$S" ;;
-  connect)      echo "connected \$2" > "\$S"; echo "Connecting to \$2"
+  # As the real client: the planner fills its cache while the client comes
+  # up (route health), BEFORE any connect -- a slice taken at connect misses it.
+  start-client) echo ready > "\$S"
                 n=3; grep -q '^max_cached_paths = 1' "\$cfg" && n=1
                 for r in \$(seq 1 \$n); do
                   echo "\$(date -u +%FT%TZ) DEBUG hopr_transport::path::planner: weighted candidate path kind=\"fill\" destination=0xdd hops=1 path=0x\${r}a -> 0xdd cost=0.\$RANDOM composite_weight=0.5 sampling_probability=\$(python3 -c "print(1/\$n)")" >> "$LOG"
                 done
                 echo "\$(date -u +%FT%TZ) DEBUG hopr_transport::path::planner: drawing return paths from tempered weights count=4 candidates=\$n" >> "$LOG" ;;
+  stop-client)  echo idle > "\$S" ;;
+  connect)      echo "connected \$2" > "\$S"; echo "Connecting to \$2" ;;
   disconnect)   grep -q connected "\$S" && echo ready > "\$S" ;;
   status)       st=\$(cat "\$S")
                 case "\$st" in
@@ -116,7 +125,7 @@ chmod +x "$SB/bin/"*
 
 export PATH="$SB/bin:$PATH" GVPN_STATE="$SB/state" GVPN_CONFIG_DIR="$SB/etc" \
        GNOSISVPN_CONFIG_PATH="$SB/etc/config.toml" GVPN_SERVICE_LOG="$LOG" \
-       GVPN_STUDY=2026-09-24-transfers-25mb GVPN_DESTINATION=UK
+       GVPN_STUDY=2026-09-28-transfers-25mb GVPN_DESTINATION=UK
 # As on the VM: the bench runs under sudo for a user who reads the results without it.
 if id nobody >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
   export SUDO_USER=nobody; chmod 755 "$SB"
@@ -215,5 +224,7 @@ as_user python3 "$KIT/bench/gvpn-analyze.py" "$RUN" --floor-mbps 5 \
   && ok "report renders as the user (report.md, sessions.csv)" || { bad "report failed"; tail -5 "$SB/report.out"; }
 grep -q 'TRIAL RUN' "$SB/report.out" && ok "report marks it a trial" || bad "report does not say TRIAL RUN"
 grep -q 'PIN DID NOT TAKE' "$SB/report.out" && bad "report voided a working pin" || ok "working pin is not voided"
+tr -s ' \n' ' ' < "$SB/report.out" | grep -q 'NOT VERIFIED' && bad "candidates missed: the planner's start-up fill was not in the session log" \
+  || ok "candidates counted from the fill the client logs while coming up"
 
 echo; [ "$fail" = 0 ] && echo "all bench tests passed" || echo "FAILURES above"; exit $fail

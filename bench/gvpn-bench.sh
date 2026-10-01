@@ -1040,6 +1040,11 @@ run_session() {  # run_session CYCLE ARM [DEST]
   dm_arm "$SERVICE_TIMEOUT"
   apply_arm_config "$arm_dir" || { echo "$cycle,$arm,-,$d,-,$REPS,config-failed" >> "$SUMMARY"; return 1; }
 
+  # From here, not from the connect: the planner fills its candidate cache
+  # while the client comes up (route-health checks), before any connect. A slice
+  # taken at connect missed that fill -- the 2026-09-30 trial read candidates
+  # "-" for auto -- and a pin that never took could have gone unnoticed.
+  local off; off=$(log_offset)
   ctl start-client "$KEEPALIVE" >>"$RUN_LOG" 2>&1
   dm_arm "$ONBOARD_TIMEOUT"
   wait_for "$ONBOARD_TIMEOUT" "node Ready" is_ready \
@@ -1049,7 +1054,6 @@ run_session() {  # run_session CYCLE ARM [DEST]
   [ -n "$dest" ] || dest="$(list_destinations | head -1)"
   [ -n "$dest" ] || { echo "$cycle,$arm,-,$d,-,$REPS,no-destination" >> "$SUMMARY"; return 1; }
 
-  local off; off=$(log_offset)
   dm_arm $(( CONNECT_TIMEOUT + SESSION_EST + 180 ))
   local t0; t0=$(now)
   ctl connect "$dest" > "$d/connect.txt" 2>&1

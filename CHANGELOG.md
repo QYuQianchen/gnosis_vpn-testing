@@ -30,6 +30,20 @@ move a number or break a node — not for docs or comments.
   VM's `.git/hooks`, which a push does not update: re-run
   `./setup/06-git-deploy.sh` once to install it. `tests/run-lock-tests.sh`
   covers every state in all three copies of the test.
+- **`make test` failed on macOS** (`timeout: command not found`, BSD `sed`):
+  the bench and lock suites drive the VM's own tools -- GNU coreutils, `/proc`.
+  They now skip on non-Linux with a message, as the routing suite already did;
+  the config suite skips when python3 has no TOML parser (< 3.11, no tomli);
+  the node suite no longer needs root (it only ever passed as root);
+  and `make test-vm` runs every suite on the VM against the local working tree,
+  in a temp dir, before anything is pushed.
+- **Candidate counts missed the planner's start-up fill.** The session log
+  was sliced from the connect, but the planner fills its candidate cache while
+  the client comes up (route-health checks), before any connect. The 2026-09-30
+  trial read candidates "-" for `auto`; a pinned arm in the same position would
+  have had its pin check silently skipped. The slice now starts before
+  `start-client`, as `use-arm.sh --count` always did, and a pinned arm with no
+  planner lines is reported as NOT VERIFIED instead of passing.
 - **Every download so far failed: the URL ended in a stray `}`.**
   `DL_URL="${GVPN_DL_URL:-…?bytes={bytes}}"` -- the first `}` closes the
   expansion, so the value from `gvpn.conf` got a literal `}` appended and curl

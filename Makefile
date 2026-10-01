@@ -6,6 +6,7 @@ STUDY  ?=
 ARM    ?= pin-planner
 FLOOR  ?=
 VM     ?= vm
+VM_HOST ?= gvpn-vm
 ORIGIN ?= origin
 BRANCH ?= main
 # The newest run that recorded at least one session; a run that aborted before
@@ -13,13 +14,14 @@ BRANCH ?= main
 RUN    ?= $(patsubst %/summary.csv,%,$(firstword $(shell ls -1t $(STATE)/runs/*/summary.csv 2>/dev/null)))
 need_study = $(if $(STUDY),,$(error set STUDY=<name from studies/>))
 
-.PHONY: help hooks test push status diagnose restore-config backup fix-perms \
+.PHONY: help hooks test test-vm push status diagnose restore-config backup fix-perms \
         arms count dry trial preflight launch smoke report publish clean-runs
 
 help:
 	@echo "Mac"
 	@echo "  make hooks                 pre-commit secret scan (once per clone)"
-	@echo "  make test                  all test suites"
+	@echo "  make test                  the test suites (bench, lock, routing skip on macOS)"
+	@echo "  make test-vm               ALL suites, on the VM, against this working tree"
 	@echo "  make push                  push to $(ORIGIN) and the VM"
 	@echo "VM -- set up and check"
 	@echo "  make status                what is installed; is a run in progress"
@@ -43,6 +45,14 @@ hooks:
 
 test:
 	@for t in tests/run-*-tests.sh; do bash "$$t" || exit 1; echo; done
+
+# Every suite, on the VM (Linux), against THIS working tree -- committed or not,
+# so it runs before the push. Unpacks into a temp dir: the VM's worktree and
+# state are not touched.
+test-vm:
+	COPYFILE_DISABLE=1 tar --exclude=.git --exclude=.DS_Store --exclude='*.gpg' -cf - . \
+	  | ssh $(VM_HOST) 'd=$$(mktemp -d) && tar --warning=no-unknown-keyword -xf - -C "$$d" \
+	      && cd "$$d" && make test; rc=$$?; rm -rf "$$d"; exit $$rc'
 
 # && on purpose: if GitHub rejects the push, the VM must not run unshared code.
 push:

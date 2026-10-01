@@ -12,8 +12,8 @@ section. The short version, on the VM:
 sudo ./setup/00-vm-setup.sh --network jura-prod --allow-insecure
 gnosis_vpn-ctl start-client 60m                         # onboard; wait for Ready
 make arms && make count ARM=auto && make count ARM=pin-planner   # many, then 1
-sudo -E ./bench/preflight.sh --study 2026-09-24-transfers-25mb --pin-current --trial-only
-make launch STUDY=2026-09-24-transfers-25mb             # ~3 h, detached
+sudo -E ./bench/preflight.sh --study 2026-09-28-transfers-25mb --pin-current --trial-only
+make launch STUDY=2026-09-28-transfers-25mb             # ~3 h, detached
 make report
 ```
 
